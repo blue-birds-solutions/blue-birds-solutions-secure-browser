@@ -1,0 +1,57 @@
+{
+  "name": "bluebirds-secure-browser",
+  "version": "1.0.0",
+  "description": "Lockdown Browser Shell for Bluebirds Assessment Platform",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "start:dev": "npm run build && electron . --dev",
+    "watch": "tsc --watch",
+    "dist": "npm run build && electron-builder"
+  },
+  "keywords": [],
+  "author": "Bluebirds Solutions",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.5.0"
+  },
+  "build": {
+    "appId": "com.bluebirdssolutions.securebrowser",
+    "productName": "BluebirdsSecureBrowser",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "blue-birds-solutions",
+        "repo": "blue-birds-solutions-secure-browser"
+      }
+    ],
+    "files": [
+      "dist/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": [
+        "dmg"
+      ],
+      "artifactName": "BluebirdsSecureBrowser.dmg"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "desktop_icon_256x256.ico",
+      "artifactName": "BluebirdsSecureBrowser-Setup.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}
