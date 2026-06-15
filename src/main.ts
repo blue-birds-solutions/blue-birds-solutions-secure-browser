@@ -102,6 +102,11 @@ let wifiMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let isExamActive = false;
 let wasOpenedViaDeepLink = false;
 let consecutiveOfflineCount = 0;
+let isInitialized = false;
+let pendingDeepLinkUrl: string | null = null;
+/** Credentials injected from deep link — made available to preload synchronously */
+let activeAttemptId: string | null = null;
+let activeToken: string | null = null;
 
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
@@ -132,20 +137,30 @@ function createWindow(): void {
     mainWindow.setContentProtection(true);
   }
 
-  // Resolve the target URL: env override → dev server → production URL
-  const targetUrl: string =
+  // Build the initial URL — if launched via deep link, go directly to system-check
+  const origin: string =
     process.env.APP_URL ??
     (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
 
-  console.log(`[SecureBrowser] Loading target: ${targetUrl}`);
-  mainWindow.loadURL(targetUrl);
+  const initialUrl = activeAttemptId
+    ? `${origin}/system-check/${activeAttemptId}`
+    : origin;
+
+  console.log(`[SecureBrowser] Loading initial URL: ${initialUrl}`);
+  mainWindow.loadURL(initialUrl);
 
   // Show window only when content is ready (prevents white flash)
+  // Also steal OS focus so window comes to foreground even if user is in another app
   mainWindow.once('ready-to-show', (): void => {
     if (mainWindow) {
       mainWindow.show();
+      // Forcibly bring to front — works on both macOS and Windows
       if (!IS_DEV) {
+        mainWindow.setAlwaysOnTop(true);
         mainWindow.focus();
+        app.focus({ steal: true });
+        // Re-enforce alwaysOnTop level after focus steal
+        mainWindow.setAlwaysOnTop(true, 'screen-saver');
       }
       // Close splash screen
       if (splashWindow) {
@@ -156,7 +171,7 @@ function createWindow(): void {
   });
 
   // Handle load failure to avoid hanging splash screen
-  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL): void => {
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL): void => {
     console.error(`[SecureBrowser] Failed to load URL: ${validatedURL} (${errorCode}: ${errorDescription})`);
     if (splashWindow) {
       splashWindow.destroy();
@@ -658,6 +673,14 @@ ipcMain.handle('get-system-status', (): SystemStatus => {
   };
 });
 
+// Synchronous IPC: preload reads this before React mounts so token is in localStorage immediately
+ipcMain.on('get-boot-tokens', (event): void => {
+  event.returnValue = {
+    attemptId: activeAttemptId ?? null,
+    token: activeToken ?? null,
+  };
+});
+
 ipcMain.on('close-browser', (_event: IpcMainEvent): void => {
   console.log('[SecureBrowser] Closing application on renderer request...');
   app.quit();
@@ -692,48 +715,89 @@ ipcMain.on('exam-finished', (): void => {
 
 // ─── Deep Link & Single Instance Handler ──────────────────────────────────────
 
+async function initializeApp(): Promise<void> {
+  if (isInitialized) return;
+  isInitialized = true;
+
+  const clean = await checkAndCleanSystem();
+  if (!clean) {
+    console.log('[SecureBrowser] Startup requirements not met. Quitting.');
+    app.quit();
+    return;
+  }
+
+  // Show splash immediately — steals focus before the main window is ready
+  createSplashWindow();
+  if (splashWindow) {
+    splashWindow.show();
+    app.focus({ steal: true });
+  }
+
+  createWindow();
+  createOverlayWindow();
+  registerGlobalShortcuts();
+  startProcessMonitor();
+  startClipboardWiper();
+  startWifiMonitor();
+}
+
 function handleDeepLink(urlStr: string): void {
   console.log(`[SecureBrowser] Deep link received: ${urlStr}`);
   wasOpenedViaDeepLink = true;
+
   try {
     const parsedUrl = new URL(urlStr);
     const attemptId = parsedUrl.searchParams.get('attemptId');
     const token = parsedUrl.searchParams.get('token');
 
-    if (attemptId && token && mainWindow) {
-      const origin =
-        process.env.APP_URL ??
-        (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
-
-      // Route through the system check page before the quiz
-      const systemCheckUrl = `${origin}/system-check/${attemptId}`;
-
-      console.log(`[SecureBrowser] Launching system check for attempt: ${attemptId}`);
-
-      // Navigate to origin root first to ensure correct domain context for localStorage
-      mainWindow.loadURL(origin).then((): void => {
-        if (!mainWindow) return;
-        // Inject token into localStorage
-        mainWindow.webContents
-          .executeJavaScript(
-            `
-            try {
-              localStorage.setItem('accessToken', '${token}');
-              console.log('[SecureBrowser] Deep link token injected successfully.');
-            } catch (e) {
-              console.error('[SecureBrowser] Deep link token injection failed:', e);
-            }
-            `
-          )
-          .then((): void => {
-            // Navigate to system check — it will proceed to /quiz/${attemptId} on success
-            mainWindow?.loadURL(systemCheckUrl);
-          });
-      });
+    if (attemptId && token) {
+      // Store credentials so preload can inject them synchronously before React boots
+      activeAttemptId = attemptId;
+      activeToken = token;
+      console.log(`[SecureBrowser] Deep link credentials stored for attempt: ${attemptId}`);
+    } else {
+      console.warn('[SecureBrowser] Deep link missing attemptId or token. Ignoring.');
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[SecureBrowser] Failed to parse deep link URL:', message);
+  }
+
+  if (!isInitialized) {
+    console.log('[SecureBrowser] App not initialized yet. Starting initialization now.');
+    initializeApp();
+    return;
+  }
+
+  // Already initialized — navigate the live window directly
+  if (mainWindow) {
+    const origin =
+      process.env.APP_URL ??
+      (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
+
+    if (activeAttemptId && activeToken) {
+      const systemCheckUrl = `${origin}/system-check/${activeAttemptId}`;
+      console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
+
+      // Navigate to origin first to ensure same-origin localStorage access
+      mainWindow.loadURL(origin).then((): void => {
+        if (!mainWindow) return;
+        mainWindow.webContents
+          .executeJavaScript(
+            `try { localStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
+          )
+          .then((): void => {
+            mainWindow?.loadURL(systemCheckUrl);
+          });
+      });
+    }
+
+    // Bring to foreground
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.setAlwaysOnTop(true);
+    mainWindow.focus();
+    app.focus({ steal: true });
   }
 }
 
@@ -744,16 +808,19 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, commandLine): void => {
-    // Focus the main window
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+    // Parse deep link URL from the new instance's command line
+    const url = commandLine.find((arg) => arg.startsWith('bluebirds-sb://'));
+    if (url) {
+      handleDeepLink(url);
     }
 
-    // Parse deep link url on Windows/Linux
-    const url = commandLine.pop();
-    if (url && url.startsWith('bluebirds-sb://')) {
-      handleDeepLink(url);
+    // Force the existing window to the foreground immediately
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.setAlwaysOnTop(true);
+      mainWindow.focus();
+      app.focus({ steal: true });
     }
   });
 
@@ -776,37 +843,19 @@ if (!gotTheLock) {
 
   // ─── App Lifecycle ───────────────────────────────────────────────────────────
 
-  app.whenReady().then(async (): Promise<void> => {
-    const clean = await checkAndCleanSystem();
-    if (!clean) {
-      console.log('[SecureBrowser] Startup requirements not met. Quitting.');
-      app.quit();
-      return;
-    }
-
-    createSplashWindow();
-    createWindow();
-    createOverlayWindow();
-    registerGlobalShortcuts();
-    startProcessMonitor();
-    startClipboardWiper();
-    startWifiMonitor();
-
+  app.whenReady().then((): void => {
     // Check if launched via deep link (Windows/Linux)
     const deepLinkArg = process.argv.find((arg): boolean =>
       arg.startsWith('bluebirds-sb://')
     );
 
     if (deepLinkArg) {
-      wasOpenedViaDeepLink = true;
-      // Deep-link launch — navigate to the correct attempt
-      setTimeout((): void => {
-        handleDeepLink(deepLinkArg);
-      }, 1000);
+      handleDeepLink(deepLinkArg);
     } else {
       // Opened directly (double-click the icon / Start Menu / npm start) without a deep link.
+      // Set a short delay to allow open-url event to fire on macOS if launched via deep link.
       setTimeout((): void => {
-        if (!wasOpenedViaDeepLink) {
+        if (!wasOpenedViaDeepLink && !isInitialized) {
           const buttons = IS_DEV
             ? ['Quit Secure Browser', 'Bypass (Dev Mode Only)']
             : ['Quit Secure Browser'];
@@ -822,16 +871,13 @@ if (!gotTheLock) {
 
           if (!IS_DEV || choice === 0) {
             console.log('[SecureBrowser] Direct launch detected. Quitting.');
-            if (splashWindow) {
-              splashWindow.destroy();
-              splashWindow = null;
-            }
             app.quit();
           } else {
             console.log('[SecureBrowser] Direct launch warning bypassed in DEV mode.');
+            initializeApp();
           }
         }
-      }, 1000);
+      }, 800);
     }
 
     // Setup Auto-Updater
@@ -855,7 +901,7 @@ if (!gotTheLock) {
 
     // Re-create window on macOS when the dock icon is clicked and no windows are open
     app.on('activate', (): void => {
-      if (BrowserWindow.getAllWindows().length === 0) {
+      if (BrowserWindow.getAllWindows().length === 0 && isInitialized) {
         createWindow();
       }
     });

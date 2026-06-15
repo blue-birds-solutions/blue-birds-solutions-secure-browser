@@ -1,5 +1,23 @@
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
+// ─── Bootstrap Token Injection ────────────────────────────────────────────────
+// This runs SYNCHRONOUSLY before the React app boots.
+// Reads deep-link credentials from the main process and injects the accessToken
+// into localStorage so the React app starts already authenticated.
+try {
+  const bootTokens = ipcRenderer.sendSync('get-boot-tokens') as {
+    attemptId: string | null;
+    token: string | null;
+  };
+  if (bootTokens?.token) {
+    localStorage.setItem('accessToken', bootTokens.token);
+    console.log('[SecureBrowser Preload] Boot token injected into localStorage.');
+  }
+} catch (e) {
+  console.warn('[SecureBrowser Preload] Failed to inject boot token:', e);
+}
+
+
 // ─── Type Definitions ────────────────────────────────────────────────────────
 
 /** Payload emitted by the main process for any security status event. */
