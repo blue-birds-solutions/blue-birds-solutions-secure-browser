@@ -765,6 +765,106 @@ function bringAppToFront(): void {
   }
 }
 
+/** Automatically closes/terminates all other active visible GUI applications on startup,
+ * whitelisting crucial OS shells, the secure browser itself, and all major web browsers.
+ */
+function closeAllOtherGUIApps(): Promise<void> {
+  const isWindows = process.platform === 'win32';
+  return new Promise((resolve) => {
+    if (isWindows) {
+      const whitelist = [
+        'explorer',
+        'bluebirdssecurebrowser',
+        'electron',
+        'chrome',
+        'msedge',
+        'firefox',
+        'opera',
+        'brave'
+      ];
+      
+      const psCommand = `powershell -Command "Get-Process | Where-Object {$_.mainWindowTitle -ne ''} | Select-Object -Unique -ExpandProperty ProcessName"`;
+      
+      exec(psCommand, (err, stdout) => {
+        if (err || !stdout) {
+          resolve();
+          return;
+        }
+        
+        const lines = stdout.split('\r\n').map(l => l.trim().toLowerCase()).filter(Boolean);
+        const toKill = lines.filter(name => !whitelist.some(w => name.includes(w)));
+        
+        if (toKill.length === 0) {
+          resolve();
+          return;
+        }
+        
+        console.log('[SecureBrowser] Auto-closing Windows GUI processes:', toKill);
+        
+        let killedCount = 0;
+        toKill.forEach((procName) => {
+          exec(`taskkill /F /IM "${procName}.exe"`, () => {
+            killedCount++;
+            if (killedCount === toKill.length) {
+              resolve();
+            }
+          });
+        });
+      });
+    } else if (process.platform === 'darwin') {
+      const appleScript = `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`;
+      
+      exec(appleScript, (err, stdout) => {
+        if (err || !stdout) {
+          resolve();
+          return;
+        }
+        
+        const apps = stdout.split(',').map(a => a.trim()).filter(Boolean);
+        const whitelist = [
+          'Finder',
+          'BluebirdsSecureBrowser',
+          'bluebirds-secure-browser',
+          'Electron',
+          'Google Chrome',
+          'Safari',
+          'Firefox',
+          'Microsoft Edge',
+          'Opera',
+          'Brave Browser'
+        ];
+        
+        const toClose = apps.filter(name => !whitelist.some(w => name.toLowerCase() === w.toLowerCase() || name.toLowerCase().includes('bluebirds')));
+        
+        if (toClose.length === 0) {
+          resolve();
+          return;
+        }
+        
+        console.log('[SecureBrowser] Auto-closing macOS GUI apps:', toClose);
+        
+        let closedCount = 0;
+        toClose.forEach((appName) => {
+          exec(`osascript -e 'tell application "${appName}" to quit'`, (quitErr) => {
+            if (quitErr) {
+              console.warn(`[SecureBrowser] Failed clean quit for macOS app ${appName}, trying pkill:`, quitErr.message);
+              exec(`pkill -9 -f "${appName}"`, () => {
+                closedCount++;
+                if (closedCount === toClose.length) resolve();
+              });
+            } else {
+              closedCount++;
+              if (closedCount === toClose.length) resolve();
+            }
+          });
+        });
+      });
+    } else {
+      resolve();
+    }
+  });
+}
+
 /** Checks for monitor count, blacklisted apps, and VM state on launch. Offers options to auto-close. */
 async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolean> {
   const isWindows = process.platform === 'win32';
@@ -772,6 +872,11 @@ async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolea
   if (IS_DEV) {
     return true;
   }
+
+  // Auto-close all other user GUI applications silently first
+  await closeAllOtherGUIApps();
+  // Give system process/window closing events 1.5 seconds to settle
+  await new Promise((resolve) => setTimeout(resolve, 1500));
 
   // 1. Check Displays
   const displays = screen.getAllDisplays();
