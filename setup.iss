@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Bluebirds Secure Browser"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Bluebirds Solutions"
 #define MyAppURL "https://tests.bluebirdstraining.com"
 #define MyAppExeName "BluebirdsSecureBrowser.exe"

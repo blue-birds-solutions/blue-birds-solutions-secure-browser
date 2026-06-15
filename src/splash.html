@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading Secure Browser</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    /* Glassmorphic premium container */
+    .container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(13, 15, 27, 0.95) 0%, rgba(6, 7, 12, 0.98) 100%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 40px;
+      position: relative;
+      box-shadow: 
+        0 20px 50px rgba(0, 0, 0, 0.6),
+        inset 0 0 20px rgba(59, 130, 246, 0.05);
+      text-align: center;
+    }
+
+    /* Decorative background glowing orb */
+    .glow-orb {
+      position: absolute;
+      width: 150px;
+      height: 150px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, rgba(59, 130, 246, 0) 70%);
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 0;
+      filter: blur(20px);
+    }
+
+    .content {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+    }
+
+    /* Animated bird logo */
+    .logo-container {
+      margin-bottom: 24px;
+      position: relative;
+    }
+
+    .logo-svg {
+      width: 72px;
+      height: 72px;
+      filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.45));
+      animation: float 3s ease-in-out infinite;
+    }
+
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
+
+    /* Brand text */
+    .brand-title {
+      font-size: 20px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+      background: linear-gradient(120deg, #ffffff 30%, #93c5fd 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-subtitle {
+      font-size: 11px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.4);
+      letter-spacing: 0.25em;
+      text-transform: uppercase;
+      margin-bottom: 36px;
+    }
+
+    /* Spinner / Loader */
+    .loader-container {
+      width: 220px;
+      position: relative;
+      margin-bottom: 16px;
+    }
+
+    .progress-bar-bg {
+      width: 100%;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 35%;
+      background: linear-gradient(90deg, #3b82f6, #60a5fa);
+      border-radius: 2px;
+      position: absolute;
+      animation: loading-bar 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+      box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+    }
+
+    @keyframes loading-bar {
+      0% {
+        left: -35%;
+      }
+      100% {
+        left: 100%;
+      }
+    }
+
+    /* Status Label */
+    .status-text {
+      font-size: 12px;
+      font-weight: 500;
+      color: rgba(255, 255, 255, 0.55);
+      height: 16px;
+      transition: all 0.3s ease;
+      letter-spacing: 0.02em;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="glow-orb"></div>
+    <div class="content">
+      <!-- Animated Premium SVG Bird + Lock Logo -->
+      <div class="logo-container">
+        <svg class="logo-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- Outer circular frame shield -->
+          <circle cx="50" cy="50" r="46" stroke="url(#shieldGrad)" stroke-width="2" stroke-dasharray="6 4" opacity="0.3"/>
+          <!-- Shield path -->
+          <path d="M50 8C68 8 78 18 78 18V45C78 63.5 63.5 78.5 50 88C36.5 78.5 22 63.5 22 45V18C22 18 32 8 50 8Z" fill="url(#bgGrad)" stroke="url(#shieldGrad)" stroke-width="2" stroke-linejoin="round"/>
+          
+          <!-- Stylized Winged Bird inside shield -->
+          <path d="M33 46C38 41 46 38 50 44C54 38 62 41 67 46C60 49 53 50 50 56C47 50 40 49 33 46Z" fill="url(#birdGrad)"/>
+          <path d="M43 43C46 39 48 37 50 40C52 37 54 39 57 43C53 45 47 45 43 43Z" fill="#ffffff" opacity="0.8"/>
+          
+          <!-- Glowing Secure Lock -->
+          <rect x="44" y="58" width="12" height="9" rx="1.5" fill="url(#lockGrad)"/>
+          <path d="M46 58V55C46 52.8 47.8 51 50 51V51C52.2 51 54 52.8 54 55V58" stroke="url(#lockGrad)" stroke-width="1.8" stroke-linecap="round"/>
+          <circle cx="50" cy="62.5" r="1.5" fill="#0d0f1b"/>
+
+          <defs>
+            <linearGradient id="shieldGrad" x1="50" y1="8" x2="50" y2="88" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#60a5fa"/>
+              <stop offset="100%" stop-color="#1d4ed8"/>
+            </linearGradient>
+            <linearGradient id="bgGrad" x1="50" y1="8" x2="50" y2="88" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#0e1329" stop-opacity="0.8"/>
+              <stop offset="100%" stop-color="#07080e" stop-opacity="0.95"/>
+            </linearGradient>
+            <linearGradient id="birdGrad" x1="33" y1="47" x2="67" y2="47" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#93c5fd"/>
+              <stop offset="50%" stop-color="#3b82f6"/>
+              <stop offset="100%" stop-color="#2563eb"/>
+            </linearGradient>
+            <linearGradient id="lockGrad" x1="44" y1="51" x2="56" y2="67" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#60a5fa"/>
+              <stop offset="100%" stop-color="#3b82f6"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+
+      <h1 class="brand-title">Bluebirds</h1>
+      <div class="brand-subtitle">Secure Browser</div>
+
+      <div class="loader-container">
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill"></div>
+        </div>
+      </div>
+
+      <div class="status-text" id="status">Preparing secure shell...</div>
+    </div>
+  </div>
+
+  <script>
+    const statuses = [
+      "Verifying system integrity...",
+      "Checking display setup...",
+      "Auditing system processes...",
+      "Connecting to assessment servers...",
+      "Establishing secure environment...",
+      "Launching exam dashboard..."
+    ];
+    let currentIndex = 0;
+    const statusEl = document.getElementById('status');
+
+    setInterval(() => {
+      currentIndex = (currentIndex + 1) % statuses.length;
+      statusEl.style.opacity = 0;
+      setTimeout(() => {
+        statusEl.textContent = statuses[currentIndex];
+        statusEl.style.opacity = 1;
+      }, 200);
+    }, 1200);
+  </script>
+</body>
+</html>

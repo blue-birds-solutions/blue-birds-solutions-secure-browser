@@ -10,6 +10,7 @@ import {
 } from 'electron';
 import path from 'path';
 import { exec } from 'child_process';
+import https from 'https';
 import { autoUpdater } from 'electron-updater';
 
 // ─── Type Definitions ────────────────────────────────────────────────────────
@@ -93,9 +94,14 @@ const BLOCKED_SHORTCUTS: readonly string[] = [
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let mainWindow: BrowserWindow | null = null;
+let overlayWindow: BrowserWindow | null = null;
+let splashWindow: BrowserWindow | null = null;
 let processMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let clipboardWiperInterval: ReturnType<typeof setInterval> | null = null;
+let wifiMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let isExamActive = false;
+let wasOpenedViaDeepLink = false;
+let consecutiveOfflineCount = 0;
 
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
@@ -103,6 +109,8 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    show: false,           // Start hidden to prevent white flash
+    backgroundColor: '#0a0b0f', // Dark background matches theme
     fullscreen: !IS_DEV,
     kiosk: !IS_DEV,        // Locks user into foreground, intercepts OS commands
     alwaysOnTop: !IS_DEV,
@@ -132,6 +140,33 @@ function createWindow(): void {
   console.log(`[SecureBrowser] Loading target: ${targetUrl}`);
   mainWindow.loadURL(targetUrl);
 
+  // Show window only when content is ready (prevents white flash)
+  mainWindow.once('ready-to-show', (): void => {
+    if (mainWindow) {
+      mainWindow.show();
+      if (!IS_DEV) {
+        mainWindow.focus();
+      }
+      // Close splash screen
+      if (splashWindow) {
+        splashWindow.destroy();
+        splashWindow = null;
+      }
+    }
+  });
+
+  // Handle load failure to avoid hanging splash screen
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL): void => {
+    console.error(`[SecureBrowser] Failed to load URL: ${validatedURL} (${errorCode}: ${errorDescription})`);
+    if (splashWindow) {
+      splashWindow.destroy();
+      splashWindow = null;
+    }
+    if (mainWindow) {
+      mainWindow.show();
+    }
+  });
+
   // Open DevTools only in developer mode
   if (IS_DEV) {
     mainWindow.webContents.openDevTools();
@@ -152,6 +187,9 @@ function createWindow(): void {
   mainWindow.on('closed', (): void => {
     mainWindow = null;
   });
+
+  mainWindow.on('moved', syncOverlayPosition);
+  mainWindow.on('resized', syncOverlayPosition);
 
   // Intercept and block common cheat keyboard shortcuts inside the renderer
   mainWindow.webContents.on('before-input-event', (_event, input): void => {
@@ -179,6 +217,175 @@ function createWindow(): void {
       _event.preventDefault();
     }
   });
+}
+
+// ─── Splash Window ────────────────────────────────────────────────────────────────
+
+function createSplashWindow(): void {
+  splashWindow = new BrowserWindow({
+    width: 450,
+    height: 300,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    resizable: false,
+    movable: false,
+    center: true,
+    skipTaskbar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+
+  const splashPath = path.join(__dirname, '..', 'src', 'splash.html');
+  splashWindow.loadFile(splashPath);
+
+  splashWindow.on('closed', (): void => {
+    splashWindow = null;
+  });
+
+  console.log('[SecureBrowser] Splash window created.');
+}
+
+// ─── Overlay Window ───────────────────────────────────────────────────────────────
+
+function createOverlayWindow(): void {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width } = primaryDisplay.workAreaSize;
+
+  overlayWindow = new BrowserWindow({
+    width,
+    height: 36,
+    x: 0,
+    y: 0,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    movable: false,
+    focusable: false,           // Doesn't steal focus from main window
+    hasShadow: false,
+    type: 'toolbar',            // Works on macOS & Linux to keep above other windows
+    webPreferences: {
+      nodeIntegration: true,    // Overlay is a local trusted file — IPC via require('electron')
+      contextIsolation: false,
+      sandbox: false,
+    },
+  });
+
+  overlayWindow.setIgnoreMouseEvents(false);   // Allow clicks on the bar
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver'); // Highest z-order tier
+
+  const overlayPath = path.join(__dirname, '..', 'src', 'overlay.html');
+  overlayWindow.loadFile(overlayPath);
+
+  overlayWindow.on('closed', (): void => {
+    overlayWindow = null;
+  });
+
+  console.log('[SecureBrowser] Overlay window created.');
+}
+
+/** Keep overlay aligned to top of screen when main window moves (fullscreen = no-op). */
+function syncOverlayPosition(): void {
+  if (!overlayWindow || !mainWindow) return;
+  const bounds = mainWindow.getBounds();
+  const { width } = screen.getPrimaryDisplay().workAreaSize;
+  overlayWindow.setBounds({ x: 0, y: bounds.y > 0 ? bounds.y : 0, width, height: 36 });
+}
+
+// ─── WiFi Monitor ────────────────────────────────────────────────────────────────
+
+/**
+ * Measures round-trip latency to the target server using a lightweight HTTPS HEAD
+ * request. Returns the ms value on success, or null on failure/timeout.
+ */
+function pingTarget(targetUrl: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(null), 5000);
+    const start = Date.now();
+
+    try {
+      const url = new URL(targetUrl);
+      const req = https.request(
+        {
+          method: 'HEAD',
+          hostname: url.hostname,
+          port: url.port || 443,
+          path: '/',
+          timeout: 5000,
+          rejectUnauthorized: false, // Self-signed certs on internal deployments
+        },
+        () => {
+          clearTimeout(timeout);
+          resolve(Date.now() - start);
+        },
+      );
+
+      req.on('error', () => {
+        clearTimeout(timeout);
+        resolve(null);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        clearTimeout(timeout);
+        resolve(null);
+      });
+
+      req.end();
+    } catch {
+      clearTimeout(timeout);
+      resolve(null);
+    }
+  });
+}
+
+function startWifiMonitor(): void {
+  const targetUrl =
+    process.env.APP_URL ??
+    (IS_DEV ? 'https://tests.bluebirdstraining.com' : 'https://tests.bluebirdstraining.com');
+
+  const sendStatus = (ms: number | null): void => {
+    if (overlayWindow) {
+      overlayWindow.webContents.send('wifi-status', { ms });
+    }
+  };
+
+  // Run an immediate check, then repeat every 3 seconds
+  const runCheck = async (): Promise<void> => {
+    const ms = await pingTarget(targetUrl);
+    sendStatus(ms);
+
+    if (ms === null) {
+      consecutiveOfflineCount += 1;
+      console.warn(
+        `[SecureBrowser] WiFi check failed. Consecutive offline count: ${consecutiveOfflineCount}`,
+      );
+
+      // Auto-exit after 2 consecutive offline checks (~6 seconds of no connectivity)
+      if (consecutiveOfflineCount >= 2 && !IS_DEV) {
+        console.error('[SecureBrowser] Network lost for 2 consecutive checks. Forcing exit.');
+        dialog.showMessageBoxSync({
+          type: 'error',
+          title: 'Network Connection Lost',
+          message:
+            'The secure browser has lost its network connection for more than 6 seconds.\n\nFor exam integrity, the session will now close. Please contact your administrator.',
+          buttons: ['Exit Secure Browser'],
+        });
+        app.quit();
+      }
+    } else {
+      consecutiveOfflineCount = 0;
+    }
+  };
+
+  runCheck();
+  wifiMonitorInterval = setInterval(runCheck, 3_000);
+  console.log('[SecureBrowser] WiFi monitor started.');
 }
 
 // ─── Global Shortcut Blocker ─────────────────────────────────────────────────
@@ -456,6 +663,23 @@ ipcMain.on('close-browser', (_event: IpcMainEvent): void => {
   app.quit();
 });
 
+// Overlay close button — show native confirm dialog then quit
+ipcMain.on('overlay-request-close', (): void => {
+  const choice = dialog.showMessageBoxSync({
+    type: 'question',
+    title: 'Close Secure Browser',
+    message: 'Are you sure you want to close the Secure Browser?\n\nThis will end your current session.',
+    buttons: ['Cancel', 'Yes, Close'],
+    defaultId: 0,
+    cancelId: 0,
+  });
+
+  if (choice === 1) {
+    console.log('[SecureBrowser] User confirmed close via overlay button.');
+    app.quit();
+  }
+});
+
 ipcMain.on('exam-started', (): void => {
   console.log('[SecureBrowser] Exam started. Auto-updates and restarts disabled.');
   isExamActive = true;
@@ -470,6 +694,7 @@ ipcMain.on('exam-finished', (): void => {
 
 function handleDeepLink(urlStr: string): void {
   console.log(`[SecureBrowser] Deep link received: ${urlStr}`);
+  wasOpenedViaDeepLink = true;
   try {
     const parsedUrl = new URL(urlStr);
     const attemptId = parsedUrl.searchParams.get('attemptId');
@@ -559,10 +784,13 @@ if (!gotTheLock) {
       return;
     }
 
+    createSplashWindow();
     createWindow();
+    createOverlayWindow();
     registerGlobalShortcuts();
     startProcessMonitor();
     startClipboardWiper();
+    startWifiMonitor();
 
     // Check if launched via deep link (Windows/Linux)
     const deepLinkArg = process.argv.find((arg): boolean =>
@@ -570,18 +798,40 @@ if (!gotTheLock) {
     );
 
     if (deepLinkArg) {
+      wasOpenedViaDeepLink = true;
       // Deep-link launch — navigate to the correct attempt
       setTimeout((): void => {
         handleDeepLink(deepLinkArg);
       }, 1000);
-    } else if (!IS_DEV) {
-      // Opened directly (double-click the icon / Start Menu) without a deep link.
-      // Redirect the student to the friendly "launch from browser" information page.
-      const baseUrl =
-        process.env.APP_URL ?? 'https://tests.bluebirdstraining.com';
+    } else {
+      // Opened directly (double-click the icon / Start Menu / npm start) without a deep link.
       setTimeout((): void => {
-        mainWindow?.loadURL(`${baseUrl}/direct-launch-error`);
-      }, 800);
+        if (!wasOpenedViaDeepLink) {
+          const buttons = IS_DEV
+            ? ['Quit Secure Browser', 'Bypass (Dev Mode Only)']
+            : ['Quit Secure Browser'];
+
+          const choice = dialog.showMessageBoxSync({
+            type: 'warning',
+            title: 'Launch via Student Portal Required',
+            message:
+              'This secure exam browser must be launched from your student dashboard.\n\nPlease log in to the portal and click "Start Test" to begin.',
+            buttons: buttons,
+            defaultId: 0,
+          });
+
+          if (!IS_DEV || choice === 0) {
+            console.log('[SecureBrowser] Direct launch detected. Quitting.');
+            if (splashWindow) {
+              splashWindow.destroy();
+              splashWindow = null;
+            }
+            app.quit();
+          } else {
+            console.log('[SecureBrowser] Direct launch warning bypassed in DEV mode.');
+          }
+        }
+      }, 1000);
     }
 
     // Setup Auto-Updater
@@ -624,5 +874,6 @@ app.on('will-quit', (): void => {
   globalShortcut.unregisterAll();
   if (processMonitorInterval !== null) clearInterval(processMonitorInterval);
   if (clipboardWiperInterval !== null) clearInterval(clipboardWiperInterval);
+  if (wifiMonitorInterval !== null) clearInterval(wifiMonitorInterval);
   console.log('[SecureBrowser] Application terminated and resources cleaned up.');
 });

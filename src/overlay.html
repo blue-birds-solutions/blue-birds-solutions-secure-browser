@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SecureBrowser Overlay</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      height: 36px;
+      overflow: hidden;
+      background: transparent;
+      /* Allow drag on the bar itself */
+      -webkit-app-region: drag;
+      user-select: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+    }
+
+    #bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 36px;
+      padding: 0 12px;
+      background: rgba(10, 11, 18, 0.88);
+      backdrop-filter: blur(18px) saturate(1.6);
+      -webkit-backdrop-filter: blur(18px) saturate(1.6);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+    }
+
+    /* Left — brand lock badge */
+    .left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      -webkit-app-region: drag;
+    }
+
+    .lock-icon {
+      width: 14px;
+      height: 14px;
+      opacity: 0.55;
+      flex-shrink: 0;
+    }
+
+    .brand {
+      font-size: 11px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.45);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    /* Center — WiFi status */
+    .center {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      -webkit-app-region: drag;
+    }
+
+    .wifi-icon {
+      display: flex;
+      align-items: center;
+      gap: 1.5px;
+      height: 14px;
+    }
+
+    .wifi-bar {
+      width: 3px;
+      border-radius: 1.5px;
+      background: rgba(255,255,255,0.18);
+      transition: background 0.4s ease, height 0.3s ease;
+    }
+
+    .wifi-bar:nth-child(1) { height: 4px; }
+    .wifi-bar:nth-child(2) { height: 7px; }
+    .wifi-bar:nth-child(3) { height: 10px; }
+    .wifi-bar:nth-child(4) { height: 13px; }
+
+    .wifi-bar.active { background: var(--wifi-color, #4ade80); }
+
+    #ping-label {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--wifi-color, #4ade80);
+      min-width: 70px;
+      text-align: left;
+      transition: color 0.4s ease;
+      letter-spacing: 0.01em;
+    }
+
+    /* Pulse dot */
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--wifi-color, #4ade80);
+      box-shadow: 0 0 0 0 var(--wifi-color, #4ade80);
+      animation: pulse-ring 2.2s ease-out infinite;
+      flex-shrink: 0;
+      transition: background 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    @keyframes pulse-ring {
+      0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--wifi-color, #4ade80) 60%, transparent); }
+      70%  { box-shadow: 0 0 0 6px transparent; }
+      100% { box-shadow: 0 0 0 0 transparent; }
+    }
+
+    /* Right — close button */
+    .right {
+      display: flex;
+      align-items: center;
+      -webkit-app-region: no-drag;
+    }
+
+    #close-btn {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: rgba(255,255,255,0.55);
+      font-size: 11px;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      outline: none;
+    }
+
+    #close-btn:hover {
+      background: rgba(239, 68, 68, 0.18);
+      border-color: rgba(239, 68, 68, 0.45);
+      color: #fca5a5;
+    }
+
+    #close-btn:active {
+      transform: scale(0.95);
+      background: rgba(239, 68, 68, 0.28);
+    }
+
+    #close-btn svg {
+      width: 11px;
+      height: 11px;
+      opacity: 0.8;
+    }
+
+    /* Offline state */
+    body.offline #bar {
+      background: rgba(30, 5, 5, 0.92);
+      border-bottom-color: rgba(239, 68, 68, 0.25);
+    }
+
+    /* Animated separator dots */
+    .sep {
+      width: 1px;
+      height: 14px;
+      background: rgba(255,255,255,0.08);
+      margin: 0 10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <!-- Left: Lock icon + brand -->
+    <div class="left">
+      <svg class="lock-icon" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      <span class="brand">Secure Browser</span>
+    </div>
+
+    <!-- Center: WiFi + Ping -->
+    <div class="center">
+      <div class="pulse-dot" id="pulse"></div>
+      <div class="wifi-icon" id="wifi-icon">
+        <div class="wifi-bar" id="b1"></div>
+        <div class="wifi-bar" id="b2"></div>
+        <div class="wifi-bar" id="b3"></div>
+        <div class="wifi-bar" id="b4"></div>
+      </div>
+      <span id="ping-label">Checking…</span>
+    </div>
+
+    <!-- Sep -->
+    <div class="sep"></div>
+
+    <!-- Right: Close -->
+    <div class="right">
+      <button id="close-btn" title="Close Secure Browser">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+        Close
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    const pingLabel   = document.getElementById('ping-label');
+    const pulseEl     = document.getElementById('pulse');
+    const bars        = [
+      document.getElementById('b1'),
+      document.getElementById('b2'),
+      document.getElementById('b3'),
+      document.getElementById('b4'),
+    ];
+    const closeBtn    = document.getElementById('close-btn');
+    const body        = document.body;
+
+    // WiFi quality thresholds
+    // good ≤ 80ms | ok ≤ 200ms | weak ≤ 500ms | bad > 500ms | offline = null
+    function applyQuality(ms) {
+      let color, activeBars, label;
+
+      if (ms === null) {
+        color = '#ef4444';
+        activeBars = 0;
+        label = '● Disconnected';
+        body.classList.add('offline');
+      } else {
+        body.classList.remove('offline');
+        if (ms <= 80) {
+          color = '#4ade80';
+          activeBars = 4;
+          label = `${ms} ms`;
+        } else if (ms <= 200) {
+          color = '#86efac';
+          activeBars = 3;
+          label = `${ms} ms`;
+        } else if (ms <= 500) {
+          color = '#facc15';
+          activeBars = 2;
+          label = `⚠ ${ms} ms`;
+        } else {
+          color = '#ef4444';
+          activeBars = 1;
+          label = `✕ ${ms} ms`;
+        }
+      }
+
+      document.documentElement.style.setProperty('--wifi-color', color);
+      pingLabel.style.color = color;
+      pulseEl.style.background = color;
+
+      bars.forEach((bar, i) => {
+        if (i < activeBars) {
+          bar.classList.add('active');
+        } else {
+          bar.classList.remove('active');
+        }
+      });
+
+      pingLabel.textContent = label;
+    }
+
+    // Listen for wifi status from main process
+    ipcRenderer.on('wifi-status', (_event, data) => {
+      applyQuality(data.ms);
+    });
+
+    // Close button — ask main process to show confirm dialog
+    closeBtn.addEventListener('click', () => {
+      ipcRenderer.send('overlay-request-close');
+    });
+  </script>
+</body>
+</html>
