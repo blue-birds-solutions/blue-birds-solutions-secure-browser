@@ -6,6 +6,7 @@ import {
   screen,
   clipboard,
   IpcMainEvent,
+  dialog,
 } from 'electron';
 import path from 'path';
 import { exec } from 'child_process';
@@ -296,6 +297,130 @@ function startProcessMonitor(): void {
   }, 3_000); // Audit every 3 seconds
 }
 
+/** Get list of all running processes in a unified promise-wrapped format. */
+function getSystemProcesses(isWindows: boolean): Promise<string[]> {
+  const queryCommand = isWindows ? 'tasklist /FO CSV /NH' : 'ps -ax -o comm=';
+  return new Promise((resolve) => {
+    exec(queryCommand, (err, stdout) => {
+      if (err) {
+        console.error('[SecureBrowser] Failed to query system processes:', err.message);
+        resolve([]);
+        return;
+      }
+      resolve(parseProcessNames(stdout, isWindows));
+    });
+  });
+}
+
+/** Collect list of running blacklisted apps and detect VM presence. */
+function getRunningViolations(processes: string[]): { forbiddenApps: string[]; vmDetected: boolean } {
+  const forbiddenAppsSet = new Set<string>();
+  let vmDetected = false;
+
+  for (const proc of processes) {
+    for (const black of BLACKLIST) {
+      if (proc.includes(black)) {
+        forbiddenAppsSet.add(proc);
+      }
+    }
+
+    if (VM_INDICATORS.some((vm) => proc.includes(vm))) {
+      vmDetected = true;
+    }
+  }
+
+  return {
+    forbiddenApps: Array.from(forbiddenAppsSet),
+    vmDetected,
+  };
+}
+
+/** Cross-platform command executor to force close running processes. */
+function killProcess(name: string, isWindows: boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const cmd = isWindows 
+      ? `taskkill /F /IM "${name}"`
+      : `pkill -9 -f -i "${name}"`;
+    
+    console.log(`[SecureBrowser] Attempting to close forbidden process: ${name} (cmd: ${cmd})`);
+    exec(cmd, (err) => {
+      if (err) {
+        console.warn(`[SecureBrowser] Failed to force close process ${name}:`, err.message);
+      }
+      resolve();
+    });
+  });
+}
+
+/** Checks for monitor count, blacklisted apps, and VM state on launch. Offers options to auto-close. */
+async function checkAndCleanSystem(): Promise<boolean> {
+  const isWindows = process.platform === 'win32';
+
+  if (IS_DEV) {
+    return true;
+  }
+
+  // 1. Check Displays
+  const displays = screen.getAllDisplays();
+  if (displays.length > 1) {
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: 'Multiple Displays Connected',
+      message: 'Multiple monitors detected. External screens must be disconnected before starting the exam.',
+      buttons: ['Retry / Recheck', 'Quit Secure Browser'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+
+    if (choice === 0) {
+      return checkAndCleanSystem();
+    }
+    return false;
+  }
+
+  // 2. Query Processes
+  const processes = await getSystemProcesses(isWindows);
+  const { forbiddenApps, vmDetected } = getRunningViolations(processes);
+
+  if (vmDetected) {
+    dialog.showMessageBoxSync({
+      type: 'error',
+      title: 'Virtualization Detected',
+      message: 'Virtual Machine / Sandbox environment detected. The assessment must be taken on a physical machine.',
+      buttons: ['Quit Secure Browser'],
+      defaultId: 0,
+    });
+    return false;
+  }
+
+  if (forbiddenApps.length > 0) {
+    const appList = forbiddenApps.map((a) => `  • ${a}`).join('\n');
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      title: 'Forbidden Applications Running',
+      message: `The following forbidden applications are currently running on your system:\n\n${appList}\n\nThey must be closed before you can enter the assessment.\n\nWould you like the Secure Browser to force close them for you?`,
+      buttons: ['Force Close All', 'Quit Secure Browser'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+
+    if (choice === 0) {
+      // Force kill each app
+      for (const proc of forbiddenApps) {
+        await killProcess(proc, isWindows);
+      }
+      // Give system processes a short delay to terminate completely
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Re-evaluate recursively
+      return checkAndCleanSystem();
+    }
+    return false;
+  }
+
+  return true;
+}
+
+
 // ─── Clipboard Wiper ─────────────────────────────────────────────────────────
 
 function startClipboardWiper(): void {
@@ -424,7 +549,14 @@ if (!gotTheLock) {
 
   // ─── App Lifecycle ───────────────────────────────────────────────────────────
 
-  app.whenReady().then((): void => {
+  app.whenReady().then(async (): Promise<void> => {
+    const clean = await checkAndCleanSystem();
+    if (!clean) {
+      console.log('[SecureBrowser] Startup requirements not met. Quitting.');
+      app.quit();
+      return;
+    }
+
     createWindow();
     registerGlobalShortcuts();
     startProcessMonitor();
