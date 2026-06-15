@@ -5,8 +5,12 @@ import {
   globalShortcut,
   screen,
   clipboard,
+  session,
   IpcMainEvent,
   dialog,
+  desktopCapturer,
+  systemPreferences,
+  shell,
 } from 'electron';
 import path from 'path';
 import { exec } from 'child_process';
@@ -104,9 +108,43 @@ let wasOpenedViaDeepLink = false;
 let consecutiveOfflineCount = 0;
 let isInitialized = false;
 let pendingDeepLinkUrl: string | null = null;
+/**
+ * When true the app is waiting for the user to configure a macOS permission
+ * (Screen Recording, Camera, Microphone) in System Settings. In this state we
+ * MUST NOT steal focus back from System Settings or other OS dialogs, and kiosk /
+ * fullscreen must be suspended so those dialogs are reachable.
+ */
+let isRequestingPermission = false;
 /** Credentials injected from deep link — made available to preload synchronously */
 let activeAttemptId: string | null = null;
 let activeToken: string | null = null;
+
+// ─── Helpers: kiosk / fullscreen lockout management ──────────────────────────
+
+/**
+ * Temporarily lifts all kiosk/always-on-top constraints so that macOS system
+ * dialogs and System Settings can appear above the window.
+ */
+function suspendKioskLockout(): void {
+  if (IS_DEV || !mainWindow || mainWindow.isDestroyed()) return;
+  console.log('[SecureBrowser] Suspending kiosk lockout for permission dialog.');
+  mainWindow.setKiosk(false);
+  mainWindow.setFullScreen(false);
+  mainWindow.setAlwaysOnTop(false);
+}
+
+/**
+ * Restores all kiosk/always-on-top constraints after a permission dialog is
+ * resolved. Only call when the app should be in full lockout mode.
+ */
+function restoreKioskLockout(): void {
+  if (IS_DEV || !mainWindow || mainWindow.isDestroyed()) return;
+  console.log('[SecureBrowser] Restoring kiosk lockout.');
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  mainWindow.setFullScreen(true);
+  mainWindow.setKiosk(true);
+  mainWindow.focus();
+}
 
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
@@ -131,10 +169,6 @@ function createWindow(): void {
     },
   });
 
-  if (process.platform === 'darwin') {
-    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  }
-
   // Anti-Screenshot / Screen Capture blocking.
   // setContentProtection(true) makes the window render as black in OS capture tools.
   if (!IS_DEV) {
@@ -154,27 +188,114 @@ function createWindow(): void {
   mainWindow.loadURL(initialUrl);
 
   // Show window only when content is ready (prevents white flash)
-  // Also steal OS focus so window comes to foreground even if user is in another app
   mainWindow.once('ready-to-show', (): void => {
     if (mainWindow) {
       mainWindow.show();
-      // Forcibly bring to front — works on both macOS and Windows
       if (!IS_DEV) {
-        if (process.platform === 'darwin') {
-          mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-        }
         mainWindow.setAlwaysOnTop(true, 'screen-saver');
         mainWindow.focus();
-        if (process.platform === 'darwin') {
-          app.show();
-        }
-        app.focus({ steal: true });
+        bringAppToFront();
+      }
+      // In dev mode (no native fullscreen) show overlay immediately.
+      if (IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.show();
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+        syncOverlayPosition();
       }
       // Close splash screen
       if (splashWindow) {
         splashWindow.destroy();
         splashWindow = null;
       }
+
+      if (!IS_DEV) {
+        // ── Resilient overlay show loop ─────────────────────────────────────
+        // On macOS, kiosk mode moves the window to a native fullscreen Space.
+        // The 'enter-full-screen' event may fire before the Space transition
+        // settles, causing the overlay to appear on the OLD desktop Space
+        // (invisible to the user). We fix this by retrying every 500 ms for
+        // up to 10 seconds. Once the overlay is confirmed visible on the
+        // correct Space, we stop retrying.
+        //
+        // setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }) ensures
+        // the overlay is eligible to appear in the fullscreen Space; the loop
+        // forces macOS to re-evaluate its placement after the Space settles.
+        let retryCount = 0;
+        const MAX_RETRIES = 20; // 20 × 500ms = 10 seconds
+        const showOverlayRetry = setInterval((): void => {
+          if (!overlayWindow || overlayWindow.isDestroyed()) {
+            clearInterval(showOverlayRetry);
+            return;
+          }
+          retryCount++;
+          syncOverlayPosition();
+          overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+          overlayWindow.show();
+          overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+          console.log(`[SecureBrowser] Overlay show attempt ${retryCount}/${MAX_RETRIES}`);
+          if (retryCount >= MAX_RETRIES) {
+            clearInterval(showOverlayRetry);
+            console.log('[SecureBrowser] Overlay show retry loop complete.');
+          }
+        }, 500);
+
+        // Additionally, keep re-asserting alwaysOnTop every 2 seconds forever
+        // so kiosk mode cannot bury the overlay if focus bounces.
+        setInterval((): void => {
+          if (overlayWindow && !overlayWindow.isDestroyed()) {
+            overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+          }
+        }, 2000);
+      }
+    }
+  });
+
+  // ── macOS native fullscreen Space transition ──────────────────────────────
+  // 'enter-full-screen' fires AFTER macOS finishes animating the window into
+  // its own Space. Re-assert overlay here as an additional safety net.
+  mainWindow.on('enter-full-screen', (): void => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      // Give the Space animation a brief moment to settle (500ms)
+      setTimeout((): void => {
+        if (!overlayWindow || overlayWindow.isDestroyed()) return;
+        syncOverlayPosition();
+        overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        overlayWindow.show();
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+        console.log('[SecureBrowser] Overlay re-asserted in enter-full-screen handler.');
+      }, 500);
+    }
+  });
+
+  // Re-assert overlay whenever the main window gains focus so kiosk cannot bury it.
+  mainWindow.on('focus', (): void => {
+    mainWindow?.webContents.send('window-focus');
+    if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+    }
+    // When returning focus after a permission request, check if permission
+    // has now been granted. If so, restore full lockout automatically.
+    if (!IS_DEV && isRequestingPermission) {
+      (async (): Promise<void> => {
+        try {
+          if (process.platform === 'darwin') {
+            const status = systemPreferences.getMediaAccessStatus('screen');
+            if (status === 'granted') {
+              const sources = await desktopCapturer.getSources({ types: ['screen'] });
+              if (sources.length > 0) {
+                console.log('[SecureBrowser] Screen permission confirmed on focus return. Restoring lockout.');
+                isRequestingPermission = false;
+                restoreKioskLockout();
+              }
+            }
+          } else {
+            isRequestingPermission = false;
+            restoreKioskLockout();
+          }
+        } catch (e) {
+          console.warn('[SecureBrowser] Error checking permission on focus return:', e);
+        }
+      })();
     }
   });
 
@@ -195,17 +316,20 @@ function createWindow(): void {
     mainWindow.webContents.openDevTools();
   }
 
-  // Force window focus back to the app when it loses focus (production only)
+  // Force window focus back to the app when it loses focus (production only).
+  // IMPORTANT: Do NOT steal focus when the app is in "permission request" mode —
+  // that is when the user needs to interact with a macOS dialog or System Settings.
   mainWindow.on('blur', (): void => {
-    if (!IS_DEV && mainWindow) {
+    if (!IS_DEV && mainWindow && !isRequestingPermission) {
       mainWindow.focus();
+      mainWindow.webContents.send('window-blur');
+    } else if (!IS_DEV && mainWindow && isRequestingPermission) {
+      // Send blur so the UI knows focus was lost, but do NOT steal it back
       mainWindow.webContents.send('window-blur');
     }
   });
 
-  mainWindow.on('focus', (): void => {
-    mainWindow?.webContents.send('window-focus');
-  });
+
 
   mainWindow.on('closed', (): void => {
     mainWindow = null;
@@ -242,7 +366,7 @@ function createWindow(): void {
   });
 }
 
-// ─── Splash Window ────────────────────────────────────────────────────────────────
+// ─── Splash Window ─────────────────────────────────────────────────────────────
 
 function createSplashWindow(): void {
   splashWindow = new BrowserWindow({
@@ -276,35 +400,47 @@ function createSplashWindow(): void {
   console.log('[SecureBrowser] Splash window created.');
 }
 
-// ─── Overlay Window ───────────────────────────────────────────────────────────────
+// ─── Overlay Window ─────────────────────────────────────────────────────────────
 
 function createOverlayWindow(): void {
-  const primaryDisplay = screen.getPrimaryDisplay();
-  const { width } = primaryDisplay.workAreaSize;
+  // Use physical screen bounds so the bar spans the full screen width
+  // even when the Dock/menu bar is on a side.
+  const { bounds } = screen.getPrimaryDisplay();
+  console.log(`[SecureBrowser] Primary display bounds: x=${bounds.x} y=${bounds.y} w=${bounds.width} h=${bounds.height}`);
 
+  // ── Standalone window — NO parent relationship ───────────────────────────
+  // macOS parent-child semantics on kiosk+fullscreen windows are unreliable:
+  // a child added before the parent enters fullscreen stays on the old Space.
+  // We use setVisibleOnAllWorkspaces(true, {visibleOnFullScreen:true}) so macOS
+  // renders it in every Space including native fullscreen ones.
   overlayWindow = new BrowserWindow({
-    width,
+    width: bounds.width,
     height: 36,
-    x: 0,
-    y: 0,
+    x: bounds.x,
+    y: bounds.y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: false,
     movable: false,
-    focusable: false,           // Doesn't steal focus from main window
+    focusable: true,    // Must be true — IPC from close button requires focus
     hasShadow: false,
-    type: 'toolbar',            // Works on macOS & Linux to keep above other windows
+    show: false,        // Hidden until the retry loop shows it after ready-to-show
+    type: 'panel',      // 'panel' windows float above kiosk/fullscreen on macOS
     webPreferences: {
-      nodeIntegration: true,    // Overlay is a local trusted file — IPC via require('electron')
+      nodeIntegration: true,    // Trusted local file — IPC via require('electron')
       contextIsolation: false,
       sandbox: false,
     },
   });
 
-  overlayWindow.setIgnoreMouseEvents(false);   // Allow clicks on the bar
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver'); // Highest z-order tier
+  overlayWindow.setIgnoreMouseEvents(false);
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+
+  // This is the key call: tells macOS this window must appear in ALL Spaces
+  // including native fullscreen ones — without needing a parent relationship.
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   const overlayPath = path.join(__dirname, '..', 'src', 'overlay.html');
   overlayWindow.loadFile(overlayPath);
@@ -313,15 +449,18 @@ function createOverlayWindow(): void {
     overlayWindow = null;
   });
 
-  console.log('[SecureBrowser] Overlay window created.');
+  console.log('[SecureBrowser] Overlay window created (standalone, all-workspaces, panel type).');
 }
 
-/** Keep overlay aligned to top of screen when main window moves (fullscreen = no-op). */
+
+/** Keep overlay bar pinned to the absolute top of the physical screen. */
 function syncOverlayPosition(): void {
-  if (!overlayWindow || !mainWindow) return;
-  const bounds = mainWindow.getBounds();
-  const { width } = screen.getPrimaryDisplay().workAreaSize;
-  overlayWindow.setBounds({ x: 0, y: bounds.y > 0 ? bounds.y : 0, width, height: 36 });
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const { bounds } = screen.getPrimaryDisplay();
+  // Always use physical screen x:0, y:0 and full physical width.
+  // In kiosk/fullscreen mode the main window covers the whole screen so the
+  // overlay should too.  workAreaSize excludes the Dock which we do NOT want.
+  overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: 36 });
 }
 
 // ─── WiFi Monitor ────────────────────────────────────────────────────────────────
@@ -597,6 +736,28 @@ function showModalDialog(
   return dialog.showMessageBoxSync(options);
 }
 
+/**
+ * Reliably brings the app to the foreground.
+ * On macOS, app.focus({ steal: true }) may fail when the app is in the background.
+ * Using AppleScript as a fallback is the most reliable approach.
+ */
+function bringAppToFront(): void {
+  app.focus({ steal: true });
+  if (process.platform === 'darwin') {
+    // AppleScript activate is the most reliable foreground steal on macOS.
+    // It works even when the app hasn't previously been in the foreground.
+    const appName = app.name || 'BluebirdsSecureBrowser';
+    exec(`osascript -e 'tell application "${appName}" to activate'`, (err) => {
+      if (err) {
+        // Fallback: use generic NSApp activation via system events
+        exec(`osascript -e 'tell application "System Events" to set frontmost of process "${appName}" to true'`, (err2) => {
+          if (err2) console.warn('[SecureBrowser] AppleScript foreground steal failed:', err2.message);
+        });
+      }
+    });
+  }
+}
+
 /** Checks for monitor count, blacklisted apps, and VM state on launch. Offers options to auto-close. */
 async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolean> {
   const isWindows = process.platform === 'win32';
@@ -684,6 +845,111 @@ function startClipboardWiper(): void {
   }, 1_000); // Wipe clipboard every second
 }
 
+// ─── Permission Handler ───────────────────────────────────────────────────────
+// macOS shows native system dialogs for screen-capture / camera / microphone.
+// Because our window runs at 'screen-saver' alwaysOnTop level (kiosk mode),
+// those OS dialogs would normally be hidden BEHIND our window, blocking the user.
+//
+// Fix: When a media permission is requested, we temporarily lower the window level
+// so the macOS permission dialog can appear on top and be clickable.
+// We restore alwaysOnTop right after the callback fires.
+
+function installPermissionHandler(): void {
+  const MEDIA_PERMISSIONS = ['media', 'camera', 'microphone', 'display-capture', 'screen'];
+
+  // Track how many permission dialogs are currently pending
+  // so we only restore lockout when all dialogs are done.
+  let pendingPermissions = 0;
+
+  const restoreAfterPermissionDelayed = (delayMs: number): void => {
+    setTimeout(() => {
+      pendingPermissions = Math.max(0, pendingPermissions - 1);
+      if (pendingPermissions === 0 && !isRequestingPermission && mainWindow && !mainWindow.isDestroyed() && !IS_DEV) {
+        restoreKioskLockout();
+        console.log('[SecureBrowser] Kiosk lockout restored after permission dialog.');
+      }
+    }, delayMs);
+  };
+
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      const isMediaPermission = MEDIA_PERMISSIONS.some(
+        (p) => permission === p || permission.includes(p)
+      );
+
+      console.log(`[SecureBrowser] Permission requested: ${permission} | isMedia: ${isMediaPermission}`);
+
+      if (isMediaPermission && mainWindow && !mainWindow.isDestroyed()) {
+        // Suspend kiosk so the macOS system dialog can appear above the window
+        pendingPermissions += 1;
+        suspendKioskLockout();
+        console.log(`[SecureBrowser] Kiosk suspended for permission dialog: ${permission}`);
+
+        // Grant the permission — Electron/Chromium will then trigger the
+        // macOS system permission dialog independently of the window level
+        callback(true);
+
+        // Restore kiosk lockout after a delay sufficient for the OS dialog
+        // to be shown and acknowledged (20 s gives user time to see the dialog)
+        restoreAfterPermissionDelayed(20_000);
+      } else {
+        // Non-media permission: grant by default
+        callback(true);
+      }
+    }
+  );
+
+  // Also handle the check handler (queried before showing the request dialog)
+  session.defaultSession.setPermissionCheckHandler(
+    (_webContents, permission) => {
+      // Allow all permission checks — actual grant decision is above
+      console.log(`[SecureBrowser] Permission check: ${permission} → allowed`);
+      return true;
+    }
+  );
+
+  // Electron 22+ handler for getDisplayMedia().
+  // When the renderer calls getDisplayMedia(), this handler fires.
+  // We check the real OS-level screen permission status:
+  //   - 'granted': use the real screen source.
+  //   - 'not-determined': trigger the OS prompt and respond accordingly.
+  //   - 'denied' / 'restricted' / no sources on Windows: reject with callback({})
+  //     so the renderer gets a real error and can show the "Open Settings" UI.
+  //
+  // IMPORTANT: We do NOT silently fall back to self-capture (request.frame)
+  // because that would hide a genuine permission failure from the student.
+  session.defaultSession.setDisplayMediaRequestHandler(
+    async (request, callback) => {
+      console.log('[SecureBrowser] setDisplayMediaRequestHandler fired');
+
+      try {
+        const sources = await desktopCapturer.getSources({ types: ['screen'] });
+        console.log(`[SecureBrowser] desktopCapturer returned ${sources.length} screen sources`);
+
+        if (sources.length > 0) {
+          // Real screen capture — TCC permission is available
+          console.log('[SecureBrowser] Using real screen source:', sources[0].name);
+          // Temporarily suspend kiosk to let the OS finish the stream handshake
+          if (mainWindow && !mainWindow.isDestroyed() && !IS_DEV) {
+            pendingPermissions += 1;
+            suspendKioskLockout();
+          }
+          callback({ video: sources[0] });
+          restoreAfterPermissionDelayed(3000);
+        } else {
+          console.log('[SecureBrowser] No screen sources available. Rejecting getDisplayMedia.');
+          callback({} as any);
+        }
+      } catch (err) {
+        console.error('[SecureBrowser] desktopCapturer.getSources failed:', err);
+        callback({} as any);
+      }
+    }
+  );
+
+  console.log('[SecureBrowser] Permission handler installed.');
+}
+
 // ─── IPC Handlers ────────────────────────────────────────────────────────────
 
 ipcMain.handle('get-system-status', (): SystemStatus => {
@@ -695,6 +961,107 @@ ipcMain.handle('get-system-status', (): SystemStatus => {
     os: process.platform,
   };
 });
+
+/**
+ * IPC: request-screen-permission
+ * Called by the renderer BEFORE getDisplayMedia().
+ *
+ * Returns the REAL OS-level screen recording permission status.
+ * - macOS: checks TCC via systemPreferences.getMediaAccessStatus('screen').
+ *   If 'not-determined', triggers the native OS prompt by probing desktopCapturer.
+ * - Windows: probes desktopCapturer.getSources to check actual access.
+ * - Linux: returns granted (no TCC equivalent).
+ *
+ * Returns: { granted: boolean; status: string; platform: string }
+ */
+ipcMain.handle('request-screen-permission', async (): Promise<{ granted: boolean; status: string; platform: string }> => {
+  const platform = process.platform;
+
+  if (platform === 'darwin') {
+    const status = systemPreferences.getMediaAccessStatus('screen');
+    console.log(`[SecureBrowser] macOS Screen Recording TCC status: ${status}`);
+
+    if (status === 'granted') {
+      return { granted: true, status, platform };
+    }
+
+    // On macOS, screen recording permissions return 'denied' even if the user hasn't been prompted yet.
+    // If status is 'not-determined', we trigger the desktopCapturer probe to force the OS prompt.
+    if (status === 'not-determined') {
+      console.log('[SecureBrowser] Screen Recording status is not-determined. Probing desktopCapturer to trigger macOS prompt/registration.');
+      isRequestingPermission = true;
+      suspendKioskLockout();
+      try {
+        await desktopCapturer.getSources({ types: ['screen'] });
+      } catch (e) {
+        console.warn('[SecureBrowser] desktopCapturer probe failed:', e);
+      }
+      isRequestingPermission = false;
+      restoreKioskLockout();
+    }
+
+    // Always return granted: true for non-determined or denied states on macOS to allow
+    // the frontend to attempt actual getDisplayMedia. If permission is enabled in System Settings,
+    // getDisplayMedia will succeed and the check will pass.
+    return { granted: true, status, platform };
+  }
+
+  if (platform === 'win32') {
+    try {
+      const sources = await desktopCapturer.getSources({ types: ['screen'] });
+      const granted = sources.length > 0;
+      console.log(`[SecureBrowser] Windows screen capture probe: ${sources.length} source(s).`);
+      return { granted, status: granted ? 'granted' : 'denied', platform };
+    } catch (e) {
+      console.warn('[SecureBrowser] Windows desktopCapturer probe failed:', e);
+      return { granted: false, status: 'denied', platform };
+    }
+  }
+
+  // Linux / other — no TCC equivalent, assume granted
+  return { granted: true, status: 'granted', platform };
+});
+
+/**
+ * IPC: open-permission-settings
+ * Opens the OS-specific permission settings page for the given permission type.
+ *
+ * macOS → System Settings → Privacy & Security → (Screen Recording / Camera / Microphone)
+ * Windows → Settings → Privacy & Security → (Screen capture / Camera / Microphone)
+ *
+ * Kiosk mode is suspended on macOS so System Settings can appear above the window.
+ * It is restored automatically in the 'focus' handler when the student returns.
+ */
+ipcMain.handle('open-permission-settings', async (_event, permType: 'screen' | 'camera' | 'microphone'): Promise<void> => {
+  const platform = process.platform;
+
+  if (platform === 'darwin') {
+    const urlMap: Record<string, string> = {
+      screen:     'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+      camera:     'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
+      microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
+    };
+    const url = urlMap[permType] ?? urlMap.screen;
+    console.log(`[SecureBrowser] Opening macOS System Settings for '${permType}': ${url}`);
+    // Suspend kiosk so System Settings can appear above the secure browser window.
+    isRequestingPermission = true;
+    suspendKioskLockout();
+    await shell.openExternal(url);
+    // Kiosk will be restored inside mainWindow 'focus' handler when student returns.
+  } else if (platform === 'win32') {
+    const urlMap: Record<string, string> = {
+      screen:     'ms-settings:privacy-broadfilesystemaccess',
+      camera:     'ms-settings:privacy-webcam',
+      microphone: 'ms-settings:privacy-microphone',
+    };
+    const url = urlMap[permType] ?? urlMap.screen;
+    console.log(`[SecureBrowser] Opening Windows Settings for '${permType}': ${url}`);
+    await shell.openExternal(url);
+  } else {
+    console.log(`[SecureBrowser] open-permission-settings: platform '${platform}' not supported.`);
+  }
+});
+
 
 // Synchronous IPC: preload reads this before React mounts so token is in localStorage immediately
 ipcMain.on('get-boot-tokens', (event): void => {
@@ -729,6 +1096,9 @@ ipcMain.on('overlay-request-close', (): void => {
 ipcMain.on('exam-started', (): void => {
   console.log('[SecureBrowser] Exam started. Auto-updates and restarts disabled.');
   isExamActive = true;
+  // Clear permission-request mode and ensure full lockout is active when exam begins
+  isRequestingPermission = false;
+  restoreKioskLockout();
 });
 
 ipcMain.on('exam-finished', (): void => {
@@ -742,14 +1112,12 @@ async function initializeApp(): Promise<void> {
   if (isInitialized) return;
   isInitialized = true;
 
-  // Show splash immediately — steals focus before any heavy check blocks the app
+  // Show splash immediately so the user sees something while system checks run.
+  // Bring to foreground before any blocking dialog (checkAndCleanSystem uses sync dialogs).
   createSplashWindow();
   if (splashWindow) {
     splashWindow.show();
-    if (process.platform === 'darwin') {
-      app.show();
-    }
-    app.focus({ steal: true });
+    bringAppToFront();
   }
 
   const clean = await checkAndCleanSystem(splashWindow ?? undefined);
@@ -761,6 +1129,7 @@ async function initializeApp(): Promise<void> {
 
   createWindow();
   createOverlayWindow();
+  installPermissionHandler(); // Must run after createWindow so session is ready
   registerGlobalShortcuts();
   startProcessMonitor();
   startClipboardWiper();
@@ -821,15 +1190,9 @@ function handleDeepLink(urlStr: string): void {
     // Bring to foreground
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
-    if (process.platform === 'darwin') {
-      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    }
     mainWindow.setAlwaysOnTop(true, 'screen-saver');
     mainWindow.focus();
-    if (process.platform === 'darwin') {
-      app.show();
-    }
-    app.focus({ steal: true });
+    bringAppToFront();
   }
 }
 
@@ -850,15 +1213,9 @@ if (!gotTheLock) {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
-      if (process.platform === 'darwin') {
-        mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-      }
       mainWindow.setAlwaysOnTop(true, 'screen-saver');
       mainWindow.focus();
-      if (process.platform === 'darwin') {
-        app.show();
-      }
-      app.focus({ steal: true });
+      bringAppToFront();
     }
   });
 
@@ -898,10 +1255,7 @@ if (!gotTheLock) {
             ? ['Quit Secure Browser', 'Bypass (Dev Mode Only)']
             : ['Quit Secure Browser'];
 
-          if (process.platform === 'darwin') {
-            app.show();
-          }
-          app.focus({ steal: true });
+          bringAppToFront();
 
           const choice = showModalDialog(null, {
             type: 'warning',

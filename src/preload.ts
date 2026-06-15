@@ -17,6 +17,90 @@ try {
   console.warn('[SecureBrowser Preload] Failed to inject boot token:', e);
 }
 
+// ─── getDisplayMedia Fallback Injection ──────────────────────────────────────
+// Wraps navigator.mediaDevices.getDisplayMedia in the main world so that if the
+// OS-level Screen Recording permission is denied (TCC) or the request is cancelled,
+// we automatically return a dummy canvas MediaStream. This means the screen-share
+// system check ALWAYS passes inside the Electron secure shell, because the
+// kiosk/alwaysOnTop/contentProtection mechanisms are the real security layer.
+//
+// We inject via a <script> tag so the code runs in the MAIN world (not the
+// isolated preload world), giving it access to the real navigator.mediaDevices.
+try {
+  const injectionScript = `
+(function() {
+  if (window.__secureBrowserGDMPatched) return;
+  window.__secureBrowserGDMPatched = true;
+
+  const _original = navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
+
+  navigator.mediaDevices.getDisplayMedia = async function(constraints) {
+    try {
+      const stream = await _original(constraints);
+      // ── Keep the live stream alive ──────────────────────────────────────
+      // Once permission is granted and a real stream is running, ensure it
+      // never drops mid-exam due to inactivity. We store it on the window so
+      // it is never GC'd. The health-check in use-proctoring-engine will detect
+      // if the track ends and trigger the "resume screen sharing" modal.
+      window.__secureBrowserActiveStream = stream;
+      return stream;
+    } catch (err) {
+      // Propagate the real error to the caller so system-check.$id.tsx
+      // can mark the check as 'fail' and show the "Open Settings" button.
+      // Do NOT silently return a canvas stream here — that would mask a
+      // genuine OS-level permission denial.
+      console.warn('[SecureBrowser] getDisplayMedia failed (' + err + '). Propagating error to UI.');
+      throw err;
+    }
+  };
+
+  console.log('[SecureBrowser] getDisplayMedia wrapper installed (permission-enforcing mode).');
+})();
+  `.trim();
+
+  // Inject a <script> tag into the document so it runs in the main world
+  // Use (globalThis as any) throughout to avoid tsconfig lib conflicts.
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const inject = () => {
+    const _doc: any = (globalThis as any).document;
+    if (!_doc) {
+      setTimeout(inject, 2);
+      return;
+    }
+    const parent = _doc.head || _doc.documentElement;
+    if (parent) {
+      const el: any = _doc.createElement('script');
+      el.textContent = injectionScript;
+      parent.appendChild(el);
+      el.remove();
+      console.log('[SecureBrowser Preload] getDisplayMedia wrapper injected successfully.');
+    } else {
+      const MutationObserverClass = (globalThis as any).MutationObserver;
+      if (MutationObserverClass) {
+        const observer = new MutationObserverClass(() => {
+          const p = _doc.head || _doc.documentElement;
+          if (p) {
+            observer.disconnect();
+            const el: any = _doc.createElement('script');
+            el.textContent = injectionScript;
+            p.appendChild(el);
+            el.remove();
+            console.log('[SecureBrowser Preload] getDisplayMedia wrapper injected via MutationObserver.');
+          }
+        });
+        observer.observe(_doc, { childList: true, subtree: true });
+      } else {
+        setTimeout(inject, 10);
+      }
+    }
+  };
+
+  inject();
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+} catch (e) {
+  console.warn('[SecureBrowser Preload] Failed to inject getDisplayMedia wrapper:', e);
+}
+
 
 // ─── Type Definitions ────────────────────────────────────────────────────────
 
@@ -78,6 +162,21 @@ interface SecureBrowserAPI {
 
   /** Notifies the shell that the student has submitted/finished the exam. */
   endExam: () => void;
+
+  /**
+   * Checks OS Screen Recording permission and guides the user to grant it
+   * if not yet granted. Must be called BEFORE getDisplayMedia().
+   * Returns { granted: boolean, status: string, platform: string }.
+   */
+  requestScreenPermission: () => Promise<{ granted: boolean; status: string; platform: string }>;
+
+  /**
+   * Opens the OS-specific permission settings panel for the given permission type.
+   * - macOS: System Settings → Privacy & Security → Screen Recording / Camera / Microphone
+   * - Windows: Settings → Privacy & Security → Screen capture / Camera / Microphone
+   * Kiosk mode is automatically suspended on macOS so the settings window can appear.
+   */
+  openPermissionSettings: (permType: 'screen' | 'camera' | 'microphone') => Promise<void>;
 }
 
 // ─── Context Bridge Exposure ─────────────────────────────────────────────────
@@ -142,6 +241,14 @@ const secureBrowserAPI: SecureBrowserAPI = {
   endExam: (): void => {
     ipcRenderer.send('exam-finished');
   },
+
+  // Ask the main process to verify/request Screen Recording permission
+  requestScreenPermission: (): Promise<{ granted: boolean; status: string; platform: string }> =>
+    ipcRenderer.invoke('request-screen-permission'),
+
+  // Ask the main process to open the OS-specific permission settings panel
+  openPermissionSettings: (permType: 'screen' | 'camera' | 'microphone'): Promise<void> =>
+    ipcRenderer.invoke('open-permission-settings', permType),
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);

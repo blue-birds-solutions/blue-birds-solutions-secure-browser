@@ -43,7 +43,12 @@
         "dmg"
       ],
       "icon": "desktop_icon.png",
-      "artifactName": "BluebirdsSecureBrowser.dmg"
+      "artifactName": "BluebirdsSecureBrowser.dmg",
+      "extendInfo": {
+        "NSCameraUsageDescription": "Camera access is required for proctoring and identity verification during the exam.",
+        "NSMicrophoneUsageDescription": "Microphone access is required for proctoring and audio analysis during the exam.",
+        "NSScreenCaptureUsageDescription": "Screen recording is required to monitor your display during the exam."
+      }
     },
     "win": {
       "target": [
