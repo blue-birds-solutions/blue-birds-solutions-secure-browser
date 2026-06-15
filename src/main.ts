@@ -464,7 +464,11 @@ function syncOverlayPosition(): void {
   overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: 36 });
 }
 
-// ─── WiFi Monitor ────────────────────────────────────────────────────────────────
+const pingAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 1000,
+  maxSockets: 1,
+});
 
 /**
  * Measures round-trip latency to the target server using a lightweight HTTPS HEAD
@@ -481,13 +485,15 @@ function pingTarget(targetUrl: string): Promise<number | null> {
         {
           method: 'HEAD',
           hostname: url.hostname,
-          port: url.port || 443,
-          path: '/',
+          port: url.port ? parseInt(url.port.toString(), 10) : 443,
+          path: url.pathname + url.search,
           timeout: 5000,
           rejectUnauthorized: false, // Self-signed certs on internal deployments
+          agent: pingAgent,
         },
-        () => {
+        (res) => {
           clearTimeout(timeout);
+          res.resume(); // Consume response to free socket back to agent pool
           resolve(Date.now() - start);
         },
       );
