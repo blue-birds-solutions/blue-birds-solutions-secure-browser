@@ -131,6 +131,10 @@ function createWindow(): void {
     },
   });
 
+  if (process.platform === 'darwin') {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+
   // Anti-Screenshot / Screen Capture blocking.
   // setContentProtection(true) makes the window render as black in OS capture tools.
   if (!IS_DEV) {
@@ -156,11 +160,15 @@ function createWindow(): void {
       mainWindow.show();
       // Forcibly bring to front — works on both macOS and Windows
       if (!IS_DEV) {
-        mainWindow.setAlwaysOnTop(true);
-        mainWindow.focus();
-        app.focus({ steal: true });
-        // Re-enforce alwaysOnTop level after focus steal
+        if (process.platform === 'darwin') {
+          mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        }
         mainWindow.setAlwaysOnTop(true, 'screen-saver');
+        mainWindow.focus();
+        if (process.platform === 'darwin') {
+          app.show();
+        }
+        app.focus({ steal: true });
       }
       // Close splash screen
       if (splashWindow) {
@@ -253,6 +261,10 @@ function createSplashWindow(): void {
       sandbox: true,
     },
   });
+
+  if (process.platform === 'darwin') {
+    splashWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
 
   const splashPath = path.join(__dirname, '..', 'src', 'splash.html');
   splashWindow.loadFile(splashPath);
@@ -384,7 +396,7 @@ function startWifiMonitor(): void {
       // Auto-exit after 2 consecutive offline checks (~6 seconds of no connectivity)
       if (consecutiveOfflineCount >= 2 && !IS_DEV) {
         console.error('[SecureBrowser] Network lost for 2 consecutive checks. Forcing exit.');
-        dialog.showMessageBoxSync({
+        showModalDialog(mainWindow, {
           type: 'error',
           title: 'Network Connection Lost',
           message:
@@ -574,8 +586,19 @@ function killProcess(name: string, isWindows: boolean): Promise<void> {
   });
 }
 
+/** Helper function to show a sync message box modal to a parent window if present. */
+function showModalDialog(
+  parent: BrowserWindow | null | undefined,
+  options: Electron.MessageBoxSyncOptions
+): number {
+  if (parent && !parent.isDestroyed()) {
+    return dialog.showMessageBoxSync(parent, options);
+  }
+  return dialog.showMessageBoxSync(options);
+}
+
 /** Checks for monitor count, blacklisted apps, and VM state on launch. Offers options to auto-close. */
-async function checkAndCleanSystem(): Promise<boolean> {
+async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolean> {
   const isWindows = process.platform === 'win32';
 
   if (IS_DEV) {
@@ -585,7 +608,7 @@ async function checkAndCleanSystem(): Promise<boolean> {
   // 1. Check Displays
   const displays = screen.getAllDisplays();
   if (displays.length > 1) {
-    const choice = dialog.showMessageBoxSync({
+    const choice = showModalDialog(parentWindow, {
       type: 'warning',
       title: 'Multiple Displays Connected',
       message: 'Multiple monitors detected. External screens must be disconnected before starting the exam.',
@@ -595,7 +618,7 @@ async function checkAndCleanSystem(): Promise<boolean> {
     });
 
     if (choice === 0) {
-      return checkAndCleanSystem();
+      return checkAndCleanSystem(parentWindow);
     }
     return false;
   }
@@ -605,7 +628,7 @@ async function checkAndCleanSystem(): Promise<boolean> {
   const { forbiddenApps, vmDetected } = getRunningViolations(processes);
 
   if (vmDetected) {
-    dialog.showMessageBoxSync({
+    showModalDialog(parentWindow, {
       type: 'error',
       title: 'Virtualization Detected',
       message: 'Virtual Machine / Sandbox environment detected. The assessment must be taken on a physical machine.',
@@ -617,7 +640,7 @@ async function checkAndCleanSystem(): Promise<boolean> {
 
   if (forbiddenApps.length > 0) {
     const appList = forbiddenApps.map((a) => `  • ${a}`).join('\n');
-    const choice = dialog.showMessageBoxSync({
+    const choice = showModalDialog(parentWindow, {
       type: 'warning',
       title: 'Forbidden Applications Running',
       message: `The following forbidden applications are currently running on your system:\n\n${appList}\n\nThey must be closed before you can enter the assessment.\n\nWould you like the Secure Browser to force close them for you?`,
@@ -634,7 +657,7 @@ async function checkAndCleanSystem(): Promise<boolean> {
       // Give system processes a short delay to terminate completely
       await new Promise((resolve) => setTimeout(resolve, 1500));
       // Re-evaluate recursively
-      return checkAndCleanSystem();
+      return checkAndCleanSystem(parentWindow);
     }
     return false;
   }
@@ -688,7 +711,7 @@ ipcMain.on('close-browser', (_event: IpcMainEvent): void => {
 
 // Overlay close button — show native confirm dialog then quit
 ipcMain.on('overlay-request-close', (): void => {
-  const choice = dialog.showMessageBoxSync({
+  const choice = showModalDialog(mainWindow, {
     type: 'question',
     title: 'Close Secure Browser',
     message: 'Are you sure you want to close the Secure Browser?\n\nThis will end your current session.',
@@ -719,18 +742,21 @@ async function initializeApp(): Promise<void> {
   if (isInitialized) return;
   isInitialized = true;
 
-  const clean = await checkAndCleanSystem();
+  // Show splash immediately — steals focus before any heavy check blocks the app
+  createSplashWindow();
+  if (splashWindow) {
+    splashWindow.show();
+    if (process.platform === 'darwin') {
+      app.show();
+    }
+    app.focus({ steal: true });
+  }
+
+  const clean = await checkAndCleanSystem(splashWindow ?? undefined);
   if (!clean) {
     console.log('[SecureBrowser] Startup requirements not met. Quitting.');
     app.quit();
     return;
-  }
-
-  // Show splash immediately — steals focus before the main window is ready
-  createSplashWindow();
-  if (splashWindow) {
-    splashWindow.show();
-    app.focus({ steal: true });
   }
 
   createWindow();
@@ -795,8 +821,14 @@ function handleDeepLink(urlStr: string): void {
     // Bring to foreground
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
-    mainWindow.setAlwaysOnTop(true);
+    if (process.platform === 'darwin') {
+      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+    mainWindow.setAlwaysOnTop(true, 'screen-saver');
     mainWindow.focus();
+    if (process.platform === 'darwin') {
+      app.show();
+    }
     app.focus({ steal: true });
   }
 }
@@ -818,8 +850,14 @@ if (!gotTheLock) {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.show();
-      mainWindow.setAlwaysOnTop(true);
+      if (process.platform === 'darwin') {
+        mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      }
+      mainWindow.setAlwaysOnTop(true, 'screen-saver');
       mainWindow.focus();
+      if (process.platform === 'darwin') {
+        app.show();
+      }
       app.focus({ steal: true });
     }
   });
@@ -860,7 +898,12 @@ if (!gotTheLock) {
             ? ['Quit Secure Browser', 'Bypass (Dev Mode Only)']
             : ['Quit Secure Browser'];
 
-          const choice = dialog.showMessageBoxSync({
+          if (process.platform === 'darwin') {
+            app.show();
+          }
+          app.focus({ steal: true });
+
+          const choice = showModalDialog(null, {
             type: 'warning',
             title: 'Launch via Student Portal Required',
             message:
