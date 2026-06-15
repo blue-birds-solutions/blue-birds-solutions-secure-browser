@@ -533,14 +533,14 @@ function startWifiMonitor(): void {
         `[SecureBrowser] WiFi check failed. Consecutive offline count: ${consecutiveOfflineCount}`,
       );
 
-      // Auto-exit after 2 consecutive offline checks (~6 seconds of no connectivity)
-      if (consecutiveOfflineCount >= 2 && !IS_DEV) {
-        console.error('[SecureBrowser] Network lost for 2 consecutive checks. Forcing exit.');
+      // Auto-exit after 10 consecutive offline checks (~30 seconds of no connectivity)
+      if (consecutiveOfflineCount >= 10 && !IS_DEV) {
+        console.error('[SecureBrowser] Network lost for 10 consecutive checks. Forcing exit.');
         showModalDialog(mainWindow, {
           type: 'error',
           title: 'Network Connection Lost',
           message:
-            'The secure browser has lost its network connection for more than 6 seconds.\n\nFor exam integrity, the session will now close. Please contact your administrator.',
+            'The secure browser has lost its network connection for more than 30 seconds.\n\nFor exam integrity, the session will now close. Please contact your administrator.',
           buttons: ['Exit Secure Browser'],
         });
         app.quit();
@@ -893,6 +893,9 @@ function installPermissionHandler(): void {
         // Restore kiosk lockout after a delay sufficient for the OS dialog
         // to be shown and acknowledged (20 s gives user time to see the dialog)
         restoreAfterPermissionDelayed(20_000);
+      } else if (permission === 'notifications') {
+        console.log(`[SecureBrowser] Blocking permission request: ${permission}`);
+        callback(false);
       } else {
         // Non-media permission: grant by default
         callback(true);
