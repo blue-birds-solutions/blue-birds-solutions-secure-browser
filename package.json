@@ -40,6 +40,7 @@
       "target": [
         "dmg"
       ],
+      "icon": "desktop_icon.png",
       "artifactName": "BluebirdsSecureBrowser.dmg"
     },
     "win": {
