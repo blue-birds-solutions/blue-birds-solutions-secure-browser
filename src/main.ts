@@ -424,7 +424,8 @@ function createOverlayWindow(): void {
     skipTaskbar: true,
     resizable: false,
     movable: false,
-    focusable: true,    // Must be true — IPC from close button requires focus
+    focusable: false,
+
     hasShadow: false,
     show: false,        // Hidden until the retry loop shows it after ready-to-show
     type: 'panel',      // 'panel' windows float above kiosk/fullscreen on macOS

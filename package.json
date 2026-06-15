@@ -8,12 +8,15 @@
     "start": "npm run build && electron .",
     "start:dev": "npm run build && electron . --dev",
     "watch": "tsc --watch",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "upload": "node upload.js",
+    "publish:r2": "npm run dist && npm run upload"
   },
   "keywords": [],
   "author": "Bluebirds Solutions",
   "license": "ISC",
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1068.0",
     "@types/node": "^22.0.0",
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3",
@@ -24,9 +27,8 @@
     "productName": "BluebirdsSecureBrowser",
     "publish": [
       {
-        "provider": "github",
-        "owner": "blue-birds-solutions",
-        "repo": "blue-birds-solutions-secure-browser"
+        "provider": "generic",
+        "url": "https://pub-1e9e8b8aa616426f91b8cc703c2bc2fa.r2.dev/"
       }
     ],
     "directories": {
