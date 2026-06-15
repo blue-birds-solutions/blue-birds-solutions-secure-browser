@@ -391,7 +391,7 @@ function createSplashWindow(): void {
   }
 
   const splashPath = path.join(__dirname, '..', 'src', 'splash.html');
-  splashWindow.loadFile(splashPath);
+  splashWindow.loadFile(splashPath, { hash: app.getVersion() });
 
   splashWindow.on('closed', (): void => {
     splashWindow = null;

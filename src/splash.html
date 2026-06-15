@@ -195,7 +195,7 @@
       </div>
 
       <h1 class="brand-title">Bluebirds</h1>
-      <div class="brand-subtitle">Secure Browser</div>
+      <div class="brand-subtitle">Secure Browser <span id="version-label" style="opacity: 0.75; font-weight: 500;"></span></div>
 
       <div class="loader-container">
         <div class="progress-bar-bg">
@@ -208,6 +208,13 @@
   </div>
 
   <script>
+    // Set version number from hash if present
+    const versionLabel = document.getElementById('version-label');
+    const version = window.location.hash.substring(1);
+    if (version) {
+      versionLabel.textContent = 'v' + version;
+    }
+
     const statuses = [
       "Verifying system integrity...",
       "Checking display setup...",
