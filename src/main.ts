@@ -479,9 +479,11 @@ function handleDeepLink(urlStr: string): void {
       const origin =
         process.env.APP_URL ??
         (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
-      const targetUrl = `${origin}/quiz/${attemptId}`;
 
-      console.log(`[SecureBrowser] Launching quiz attempt via deep link: ${attemptId}`);
+      // Route through the system check page before the quiz
+      const systemCheckUrl = `${origin}/system-check/${attemptId}`;
+
+      console.log(`[SecureBrowser] Launching system check for attempt: ${attemptId}`);
 
       // Navigate to origin root first to ensure correct domain context for localStorage
       mainWindow.loadURL(origin).then((): void => {
@@ -499,8 +501,8 @@ function handleDeepLink(urlStr: string): void {
             `
           )
           .then((): void => {
-            // Navigate directly to the quiz page
-            mainWindow?.loadURL(targetUrl);
+            // Navigate to system check — it will proceed to /quiz/${attemptId} on success
+            mainWindow?.loadURL(systemCheckUrl);
           });
       });
     }
@@ -566,10 +568,20 @@ if (!gotTheLock) {
     const deepLinkArg = process.argv.find((arg): boolean =>
       arg.startsWith('bluebirds-sb://')
     );
+
     if (deepLinkArg) {
+      // Deep-link launch — navigate to the correct attempt
       setTimeout((): void => {
         handleDeepLink(deepLinkArg);
       }, 1000);
+    } else if (!IS_DEV) {
+      // Opened directly (double-click the icon / Start Menu) without a deep link.
+      // Redirect the student to the friendly "launch from browser" information page.
+      const baseUrl =
+        process.env.APP_URL ?? 'https://tests.bluebirdstraining.com';
+      setTimeout((): void => {
+        mainWindow?.loadURL(`${baseUrl}/direct-launch-error`);
+      }, 800);
     }
 
     // Setup Auto-Updater
