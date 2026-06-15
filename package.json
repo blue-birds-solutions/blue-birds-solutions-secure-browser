@@ -29,6 +29,9 @@
         "repo": "blue-birds-solutions-secure-browser"
       }
     ],
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**/*"
     ],
