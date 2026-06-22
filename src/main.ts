@@ -104,6 +104,7 @@ let processMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let clipboardWiperInterval: ReturnType<typeof setInterval> | null = null;
 let wifiMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let isExamActive = false;
+let isUpdateDownloaded = false;
 let wasOpenedViaDeepLink = false;
 let consecutiveOfflineCount = 0;
 let isInitialized = false;
@@ -1219,6 +1220,10 @@ ipcMain.on('exam-started', (): void => {
 ipcMain.on('exam-finished', (): void => {
   console.log('[SecureBrowser] Exam finished. Auto-updates enabled.');
   isExamActive = false;
+  if (isUpdateDownloaded) {
+    console.log('[SecureBrowser] Installing postponed update after exam finished...');
+    autoUpdater.quitAndInstall();
+  }
 });
 
 // ─── Deep Link & Single Instance Handler ──────────────────────────────────────
@@ -1397,6 +1402,7 @@ if (!gotTheLock) {
     autoUpdater.autoInstallOnAppQuit = true;
 
     autoUpdater.on('update-downloaded', (): void => {
+      isUpdateDownloaded = true;
       if (!isExamActive) {
         console.log('[SecureBrowser] Update downloaded and student is not in exam. Installing...');
         autoUpdater.quitAndInstall();
