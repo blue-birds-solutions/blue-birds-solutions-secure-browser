@@ -578,6 +578,12 @@ function registerGlobalShortcuts(): void {
       console.warn(`[SecureBrowser] Failed to block shortcut "${shortcut}": ${message}`);
     }
   }
+  console.log('[SecureBrowser] Global lockdown shortcuts registered.');
+}
+
+function unregisterGlobalShortcuts(): void {
+  globalShortcut.unregisterAll();
+  console.log('[SecureBrowser] Global lockdown shortcuts unregistered.');
 }
 
 // ─── Process Monitor ─────────────────────────────────────────────────────────
@@ -640,8 +646,10 @@ function sendSecurityStatus(status: SecurityStatus): void {
 }
 
 function startProcessMonitor(): void {
+  if (processMonitorInterval !== null) return;
   const isWindows: boolean = process.platform === 'win32';
   const queryCommand: string = isWindows ? 'tasklist /FO CSV /NH' : 'ps -ax -o comm=';
+  console.log('[SecureBrowser] Starting periodic process monitor.');
 
   processMonitorInterval = setInterval((): void => {
     // Check for multiple connected displays before querying processes
@@ -940,10 +948,19 @@ async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolea
 }
 
 
+function stopProcessMonitor(): void {
+  if (processMonitorInterval !== null) {
+    clearInterval(processMonitorInterval);
+    processMonitorInterval = null;
+    console.log('[SecureBrowser] Process monitor stopped.');
+  }
+}
+
 // ─── Clipboard Wiper ─────────────────────────────────────────────────────────
 
 function startClipboardWiper(): void {
-  if (IS_DEV) return;
+  if (IS_DEV || clipboardWiperInterval !== null) return;
+  console.log('[SecureBrowser] Starting clipboard wiper.');
 
   clipboardWiperInterval = setInterval((): void => {
     try {
@@ -956,6 +973,14 @@ function startClipboardWiper(): void {
       console.error('[SecureBrowser] Failed to clear clipboard:', message);
     }
   }, 1_000); // Wipe clipboard every second
+}
+
+function stopClipboardWiper(): void {
+  if (clipboardWiperInterval !== null) {
+    clearInterval(clipboardWiperInterval);
+    clipboardWiperInterval = null;
+    console.log('[SecureBrowser] Clipboard wiper stopped.');
+  }
 }
 
 // ─── Permission Handler ───────────────────────────────────────────────────────
@@ -1210,16 +1235,23 @@ ipcMain.on('overlay-request-close', (): void => {
 });
 
 ipcMain.on('exam-started', (): void => {
-  console.log('[SecureBrowser] Exam started. Auto-updates and restarts disabled.');
+  console.log('[SecureBrowser] Exam started. Activating security lockout, shortcuts & process monitoring.');
   isExamActive = true;
   // Clear permission-request mode and ensure full lockout is active when exam begins
   isRequestingPermission = false;
   restoreKioskLockout();
+  registerGlobalShortcuts();
+  startProcessMonitor();
+  startClipboardWiper();
 });
 
 ipcMain.on('exam-finished', (): void => {
-  console.log('[SecureBrowser] Exam finished. Auto-updates enabled.');
+  console.log('[SecureBrowser] Exam finished. Deactivating security hooks; auto-updates enabled.');
   isExamActive = false;
+  unregisterGlobalShortcuts();
+  stopProcessMonitor();
+  stopClipboardWiper();
+  suspendKioskLockout();
   if (isUpdateDownloaded) {
     console.log('[SecureBrowser] Installing postponed update after exam finished...');
     autoUpdater.quitAndInstall();
@@ -1250,10 +1282,8 @@ async function initializeApp(): Promise<void> {
   createWindow();
   createOverlayWindow();
   installPermissionHandler(); // Must run after createWindow so session is ready
-  registerGlobalShortcuts();
-  startProcessMonitor();
-  startClipboardWiper();
   startWifiMonitor();
+  console.log('[SecureBrowser] Application initialized. High-impact security hooks deferred to exam start.');
 }
 
 function handleDeepLink(urlStr: string): void {
@@ -1435,9 +1465,12 @@ app.on('window-all-closed', (): void => {
 
 // Clean up on quit
 app.on('will-quit', (): void => {
-  globalShortcut.unregisterAll();
-  if (processMonitorInterval !== null) clearInterval(processMonitorInterval);
-  if (clipboardWiperInterval !== null) clearInterval(clipboardWiperInterval);
-  if (wifiMonitorInterval !== null) clearInterval(wifiMonitorInterval);
+  unregisterGlobalShortcuts();
+  stopProcessMonitor();
+  stopClipboardWiper();
+  if (wifiMonitorInterval !== null) {
+    clearInterval(wifiMonitorInterval);
+    wifiMonitorInterval = null;
+  }
   console.log('[SecureBrowser] Application terminated and resources cleaned up.');
 });

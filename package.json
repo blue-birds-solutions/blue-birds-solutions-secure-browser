@@ -1,6 +1,6 @@
 {
   "name": "bluebirds-secure-browser",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Lockdown Browser Shell for Bluebirds Assessment Platform",
   "main": "dist/main.js",
   "scripts": {
@@ -10,7 +10,8 @@
     "watch": "tsc --watch",
     "dist": "npm run build && electron-builder",
     "upload": "node upload.js",
-    "publish:r2": "npm run dist && npm run upload"
+    "publish:r2": "npm run dist && npm run upload",
+    "sign:win": "powershell -ExecutionPolicy Bypass -File scripts/sign.ps1"
   },
   "keywords": [],
   "author": "Bluebirds Solutions",
@@ -25,6 +26,14 @@
   "build": {
     "appId": "com.bluebirdssolutions.securebrowser",
     "productName": "BluebirdsSecureBrowser",
+    "protocols": [
+      {
+        "name": "Bluebirds Secure Browser",
+        "schemes": [
+          "bluebirds-sb"
+        ]
+      }
+    ],
     "publish": [
       {
         "provider": "generic",
@@ -54,16 +63,26 @@
     },
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "desktop_icon_256x256.ico",
       "artifactName": "BluebirdsSecureBrowser-Setup.exe"
     },
     "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "allowElevation": false,
-      "allowToChangeInstallationDirectory": false
+      "oneClick": false,
+      "perMachine": true,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Bluebirds Secure Browser",
+      "runAfterFinish": true,
+      "include": "installer.nsh"
     }
   },
   "dependencies": {
