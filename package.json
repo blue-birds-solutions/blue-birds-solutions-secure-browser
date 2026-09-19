@@ -1,6 +1,6 @@
 {
   "name": "bluebirds-secure-browser",
-  "version": "1.1.14",
+  "version": "1.1.15",
   "description": "Lockdown Browser Shell for Bluebirds Assessment Platform",
   "main": "dist/main.js",
   "scripts": {
@@ -52,8 +52,14 @@
       "src/overlay.html",
       "src/splash.html",
       "src/desktop_icon.png",
-      "desktop_icon.png",
-      "scripts/**/*"
+      "desktop_icon.png"
+    ],
+    "extraResources": [
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": ["**/*"]
+      }
     ],
     "mac": {
       "category": "public.app-category.education",

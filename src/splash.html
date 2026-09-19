@@ -124,6 +124,43 @@
       box-shadow: 0 0 8px #10b981;
     }
 
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #splash-exit-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 24px;
+      padding: 0 10px;
+      border-radius: 9999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      font-family: inherit;
+      color: #fca5a5;
+      background: rgba(239, 68, 68, 0.14);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    #splash-exit-btn:hover {
+      background: rgba(239, 68, 68, 0.3);
+      border-color: rgba(239, 68, 68, 0.7);
+      color: #ffffff;
+      box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);
+    }
+
+    #splash-exit-btn:active {
+      transform: scale(0.96);
+    }
+
     @keyframes pulse-dot {
       0%, 100% { opacity: 1; transform: scale(1); }
       50% { opacity: 0.4; transform: scale(0.85); }
@@ -267,9 +304,18 @@
           <div class="brand-subtitle">Secure Exam Browser <span id="current-version-label"></span></div>
         </div>
       </div>
-      <div class="badge" id="status-badge">
-        <span class="badge-dot" id="badge-dot"></span>
-        <span id="badge-text">INITIALIZING</span>
+      <div class="header-actions">
+        <div class="badge" id="status-badge">
+          <span class="badge-dot" id="badge-dot"></span>
+          <span id="badge-text">INITIALIZING</span>
+        </div>
+        <button id="splash-exit-btn" title="Cancel startup and exit application (Cmd+L)">
+          <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+          Exit
+        </button>
       </div>
     </div>
 
@@ -322,6 +368,17 @@
 
     const badgeEl = document.getElementById('status-badge');
     const badgeTextEl = document.getElementById('badge-text');
+    const splashExitBtn = document.getElementById('splash-exit-btn');
+    if (splashExitBtn) {
+      splashExitBtn.addEventListener('click', () => {
+        try {
+          const { ipcRenderer } = require('electron');
+          ipcRenderer.send('splash-cancel-exit');
+        } catch (err) {
+          console.error('[Splash] Failed to send splash-cancel-exit', err);
+        }
+      });
+    }
     const titleEl = document.getElementById('status-title');
     const percentEl = document.getElementById('percent-readout');
     const progressEl = document.getElementById('progress-bar');

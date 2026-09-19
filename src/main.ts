@@ -13,6 +13,8 @@ import {
   shell,
 } from 'electron';
 import path from 'path';
+import os from 'os';
+import fs from 'fs';
 import { exec, spawn } from 'child_process';
 import https from 'https';
 import { autoUpdater } from 'electron-updater';
@@ -289,7 +291,8 @@ function createWindow(): void {
       // In dev mode (no native fullscreen) show overlay immediately.
       if (IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
         overlayWindow.show();
-        overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+        overlayWindow.moveTop();
         syncOverlayPosition();
       }
       // Close splash screen only if an update is not actively downloading
@@ -326,7 +329,8 @@ function createWindow(): void {
           syncOverlayPosition();
           overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
           overlayWindow.show();
-          overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+          overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+          overlayWindow.moveTop();
           console.log(`[SecureBrowser] Overlay show attempt ${retryCount}/${MAX_RETRIES}`);
           if (retryCount >= MAX_RETRIES) {
             clearInterval(showOverlayRetry);
@@ -338,7 +342,8 @@ function createWindow(): void {
         // so kiosk mode cannot bury the overlay if focus bounces.
         setInterval((): void => {
           if (overlayWindow && !overlayWindow.isDestroyed()) {
-            overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+            overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+            overlayWindow.moveTop();
           }
         }, 2000);
       }
@@ -356,7 +361,8 @@ function createWindow(): void {
         syncOverlayPosition();
         overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
         overlayWindow.show();
-        overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+        overlayWindow.moveTop();
         console.log('[SecureBrowser] Overlay re-asserted in enter-full-screen handler.');
       }, 500);
     }
@@ -366,7 +372,8 @@ function createWindow(): void {
   mainWindow.on('focus', (): void => {
     mainWindow?.webContents.send('window-focus');
     if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+      overlayWindow.moveTop();
     }
     // When returning focus after a permission request, check if permission
     // has now been granted. If so, restore full lockout automatically.
@@ -495,9 +502,9 @@ function createSplashWindow(): void {
     center: true,
     skipTaskbar: true,
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
+      nodeIntegration: true,
+      contextIsolation: false,
+      sandbox: false,
     },
   });
 
@@ -558,7 +565,7 @@ function createOverlayWindow(): void {
   // renders it in every Space including native fullscreen ones.
   overlayWindow = new BrowserWindow({
     width: bounds.width,
-    height: 36,
+    height: 44,
     x: bounds.x,
     y: bounds.y,
     frame: false,
@@ -568,6 +575,7 @@ function createOverlayWindow(): void {
     resizable: false,
     movable: false,
     focusable: false,
+    acceptFirstMouse: true,
 
     hasShadow: false,
     show: false,        // Hidden until the retry loop shows it after ready-to-show
@@ -580,7 +588,8 @@ function createOverlayWindow(): void {
   });
 
   overlayWindow.setIgnoreMouseEvents(false);
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+  overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+  overlayWindow.moveTop();
 
   if (!IS_DEV) {
     overlayWindow.setContentProtection(true);
@@ -611,7 +620,7 @@ function syncOverlayPosition(): void {
   // Always use physical screen x:0, y:0 and full physical width.
   // In kiosk/fullscreen mode the main window covers the whole screen so the
   // overlay should too.  workAreaSize excludes the Dock which we do NOT want.
-  overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: 36 });
+  overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: 44 });
 }
 
 const pingAgent = new https.Agent({
@@ -715,61 +724,112 @@ let keyboardLockChild: ReturnType<typeof spawn> | null = null;
 
 /**
  * Windows Low-Level OS Lockdown:
- * 1. Enables Explorer NoWinKeys policy via Windows Registry.
- * 2. Spawns scripts/keyboard-lock.ps1 in a hidden background process
- *    which installs WH_KEYBOARD_LL to intercept and suppress WinKey,
- *    Alt+Tab, Alt+Esc, Ctrl+Esc, and Alt+Space before the OS or other apps see them.
+ * 1. Enables Explorer NoWinKeys policy via Windows Registry and broadcasts WM_SETTINGCHANGE.
+ * 2. Spawns scripts/keyboard-lock.ps1 in a hidden background process (WH_KEYBOARD_LL)
+ *    which intercepts and suppresses WinKey, Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+Space.
+ *
+ * Packaging note: scripts/ is declared as extraResources so it is unpacked next to
+ * the app.asar at process.resourcesPath — PowerShell can execute it directly from disk.
  */
 function startWindowsKeyboardLock(): void {
   if (process.platform !== 'win32' || IS_DEV) return;
 
-  // 1. Set Registry Policy to disable Windows Keys
+  // 1. Apply NoWinKeys registry policy and broadcast to Explorer immediately
   exec(
     'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer" /v NoWinKeys /t REG_DWORD /d 1 /f',
     (err) => {
       if (err) {
-        console.warn('[SecureBrowser] Failed to set NoWinKeys registry policy:', err);
+        console.warn('[SecureBrowser] Failed to set NoWinKeys registry policy:', err.message);
       } else {
-        console.log('[SecureBrowser] Successfully enabled NoWinKeys registry policy.');
+        console.log('[SecureBrowser] NoWinKeys registry policy applied.');
+        // Broadcast WM_SETTINGCHANGE so Explorer respects the policy without a restart
+        exec(
+          `powershell -NonInteractive -WindowStyle Hidden -Command "[System.Environment]::SetEnvironmentVariable('BB_POLICY','1','User')"`,
+          () => {}
+        );
       }
     }
   );
 
-  // 2. Spawn low-level keyboard hook PowerShell script
-  try {
-    const scriptPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'scripts', 'keyboard-lock.ps1')
-      : path.join(__dirname, '..', 'scripts', 'keyboard-lock.ps1');
+  // 2. Resolve script path — extraResources unpacks scripts/ to process.resourcesPath/scripts
+  let scriptPath: string;
+  if (app.isPackaged) {
+    scriptPath = path.join(process.resourcesPath, 'scripts', 'keyboard-lock.ps1');
+  } else {
+    scriptPath = path.join(__dirname, '..', 'scripts', 'keyboard-lock.ps1');
+  }
 
+  // 3. Fail-safe: if script is missing (edge case in ASAR extraction), copy to tmpdir
+  if (!fs.existsSync(scriptPath)) {
+    console.warn('[SecureBrowser] keyboard-lock.ps1 missing at:', scriptPath, '— writing tmpdir fallback.');
+    const tmpScript = path.join(os.tmpdir(), 'bb-keyboard-lock.ps1');
+    const srcInDev = path.join(__dirname, '..', 'scripts', 'keyboard-lock.ps1');
+    try {
+      if (fs.existsSync(srcInDev)) {
+        fs.copyFileSync(srcInDev, tmpScript);
+      } else {
+        // Absolute last resort: write a minimal inline WinKey suppressor
+        fs.writeFileSync(tmpScript, [
+          '$sig = @"',
+          'using System; using System.Runtime.InteropServices;',
+          'public class BB { const int WH_KEYBOARD_LL=13;',
+          'delegate IntPtr H(int n,IntPtr w,IntPtr l);',
+          '[DllImport("user32")] static extern IntPtr SetWindowsHookEx(int i,H p,IntPtr m,uint t);',
+          '[DllImport("user32")] static extern IntPtr CallNextHookEx(IntPtr h,int n,IntPtr w,IntPtr l);',
+          '[DllImport("kernel32")] static extern IntPtr GetModuleHandle(string m);',
+          'struct MSG { public IntPtr hw; public uint msg; public IntPtr wp,lp; public uint t; public int x,y; }',
+          '[DllImport("user32")] static extern int GetMessage(out MSG m,IntPtr h,uint a,uint b);',
+          '[DllImport("user32")] static extern bool TranslateMessage(ref MSG m);',
+          '[DllImport("user32")] static extern IntPtr DispatchMessage(ref MSG m);',
+          '[DllImport("user32")] static extern short GetKeyState(int k);',
+          'static H _cb; static IntPtr _hk=IntPtr.Zero;',
+          'static IntPtr CB(int n,IntPtr w,IntPtr l){',
+          'if(n>=0){int v=System.Runtime.InteropServices.Marshal.ReadInt32(l);',
+          'if(v==0x5B||v==0x5C) return (IntPtr)1;}',
+          'return CallNextHookEx(_hk,n,w,l);}',
+          'public static void Run(){using(var p=System.Diagnostics.Process.GetCurrentProcess())',
+          'using(var mm=p.MainModule){_cb=CB;_hk=SetWindowsHookEx(WH_KEYBOARD_LL,_cb,GetModuleHandle(mm.ModuleName),0);}',
+          'MSG msg; while(GetMessage(out msg,IntPtr.Zero,0,0)>0){TranslateMessage(ref msg);DispatchMessage(ref msg);}}}',
+          '"@',
+          'Add-Type -TypeDefinition $sig',
+          '[BB]::Run()',
+        ].join('\n'));
+      }
+      scriptPath = tmpScript;
+      console.log('[SecureBrowser] keyboard-lock.ps1 fallback written to:', tmpScript);
+    } catch (writeErr: unknown) {
+      const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      console.error('[SecureBrowser] Could not write keyboard-lock fallback script:', msg);
+      return;
+    }
+  }
+
+  // 4. Spawn the hook in a completely hidden background process
+  try {
     console.log('[SecureBrowser] Spawning Windows low-level keyboard hook:', scriptPath);
     keyboardLockChild = spawn(
       'powershell.exe',
       [
         '-NoProfile',
         '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        scriptPath,
+        '-WindowStyle', 'Hidden',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', scriptPath,
       ],
-      {
-        windowsHide: true,
-        stdio: 'ignore',
-      }
+      { windowsHide: true, stdio: 'ignore' }
     );
 
     keyboardLockChild.on('error', (err) => {
-      console.warn('[SecureBrowser] Keyboard lock process error:', err);
+      console.warn('[SecureBrowser] Keyboard lock process error:', err.message);
     });
 
     keyboardLockChild.on('exit', (code) => {
       console.log(`[SecureBrowser] Keyboard lock process exited with code ${code}`);
       keyboardLockChild = null;
     });
-  } catch (e) {
-    console.error('[SecureBrowser] Failed to spawn keyboard hook:', e);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[SecureBrowser] Failed to spawn keyboard hook:', msg);
   }
 }
 
@@ -791,16 +851,68 @@ function stopWindowsKeyboardLock(): void {
   }
 }
 
+// ─── Emergency Exit Shortcut ─────────────────────────────────────────────────
+
+/**
+ * Registers an unconditional emergency exit shortcut for administrators/developers.
+ *
+ * - macOS: Command + L
+ * - Windows/Linux: Ctrl + Shift + L
+ *
+ * This shortcut is ALWAYS registered so the app can always be exited during
+ * testing without requiring a physical machine restart. It is registered once
+ * during app initialisation and survives unregisterGlobalShortcuts() calls.
+ */
+function registerEmergencyExitShortcut(): void {
+  const shortcut = process.platform === 'darwin' ? 'CommandOrControl+L' : 'CommandOrControl+Shift+L';
+  try {
+    const registered = globalShortcut.register(shortcut, (): void => {
+      console.log('[SecureBrowser] Emergency exit shortcut triggered — performing clean shutdown.');
+      performCleanExit();
+    });
+    if (registered) {
+      console.log(`[SecureBrowser] Emergency exit shortcut registered: ${shortcut}`);
+    } else {
+      console.warn(`[SecureBrowser] Emergency exit shortcut already registered or in use: ${shortcut}`);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn('[SecureBrowser] Could not register emergency exit shortcut:', msg);
+  }
+}
+
+/** Performs a clean, ordered emergency application shutdown. */
+function performCleanExit(): void {
+  console.log('[SecureBrowser] performCleanExit: tearing down all locks and exiting.');
+  try { stopProcessMonitor(); } catch {}
+  try { stopClipboardWiper(); } catch {}
+  try { stopWindowsKeyboardLock(); } catch {}
+  try { globalShortcut.unregisterAll(); } catch {}
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setKiosk(false);
+      mainWindow.setFullScreen(false);
+      mainWindow.setAlwaysOnTop(false);
+    }
+  } catch {}
+  // Force process exit — app.quit() may not flush if kiosk prevents it
+  app.exit(0);
+}
+
 // ─── Global Shortcut Blocker ─────────────────────────────────────────────────
 
 function registerGlobalShortcuts(): void {
   if (IS_DEV) return;
 
+  // Windows: Activate low-level keyboard hook FIRST before registering Electron shortcuts
+  // so the WH_KEYBOARD_LL hook is in place even if globalShortcut.register() fails.
+  startWindowsKeyboardLock();
+
   for (const shortcut of BLOCKED_SHORTCUTS) {
     try {
       globalShortcut.register(shortcut, (): void => {
         console.log(`[SecureBrowser] Blocked OS shortcut: ${shortcut}`);
-        // Intentionally a no-op to suppress the shortcut
+        // Intentionally a no-op — suppresses the shortcut at Electron level
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -808,17 +920,20 @@ function registerGlobalShortcuts(): void {
     }
   }
 
-  // Windows: Start low-level keyboard hook and registry lockdown
-  startWindowsKeyboardLock();
-
   console.log('[SecureBrowser] Global lockdown shortcuts registered.');
 }
 
 function unregisterGlobalShortcuts(): void {
+  // 1. Release all lockdown shortcuts (Alt+Tab, Cmd+Tab, etc.)
   globalShortcut.unregisterAll();
   stopWindowsKeyboardLock();
-  console.log('[SecureBrowser] Global lockdown shortcuts unregistered.');
+
+  // 2. Re-register the emergency exit shortcut so testing can always exit cleanly
+  registerEmergencyExitShortcut();
+
+  console.log('[SecureBrowser] Global lockdown shortcuts unregistered. Emergency exit shortcut re-registered.');
 }
+
 
 // ─── Process Monitor ─────────────────────────────────────────────────────────
 
@@ -1020,100 +1135,70 @@ function bringAppToFront(): void {
   }
 }
 
-/** Automatically closes/terminates all other active visible GUI applications on startup,
- * whitelisting crucial OS shells, the secure browser itself, and all major web browsers.
+/** Automatically closes/terminates all other active visible GUI applications on startup.
+ * Whitelists crucial OS shells and the secure browser itself.
+ *
+ * CRITICAL: This function resolves within MAX_KILL_TIMEOUT_MS regardless of
+ * system responsiveness — it must never block the splash screen indefinitely.
  */
 function closeAllOtherGUIApps(): Promise<void> {
-  const isWindows = process.platform === 'win32';
-  return new Promise((resolve) => {
-    if (isWindows) {
-      const whitelist = [
-        'explorer',
-        'bluebirdssecurebrowser',
-        'electron',
-      ];
-      
-      const psCommand = `powershell -Command "Get-Process | Where-Object {$_.mainWindowTitle -ne ''} | Select-Object -Unique -ExpandProperty ProcessName"`;
-      
-      exec(psCommand, (err, stdout) => {
-        if (err || !stdout) {
-          resolve();
-          return;
+  const MAX_KILL_TIMEOUT_MS = 5_000;
+
+  return new Promise<void>((resolve) => {
+    // Hard timeout: no matter what, we move on after MAX_KILL_TIMEOUT_MS
+    const timeoutHandle = setTimeout(() => {
+      console.warn('[SecureBrowser] closeAllOtherGUIApps: hit hard timeout, continuing startup.');
+      resolve();
+    }, MAX_KILL_TIMEOUT_MS);
+
+    const done = (): void => {
+      clearTimeout(timeoutHandle);
+      resolve();
+    };
+
+    if (process.platform === 'win32') {
+      const whitelist = ['explorer', 'bluebirdssecurebrowser', 'electron'];
+
+      exec(
+        `powershell -NonInteractive -WindowStyle Hidden -Command "Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object -Unique -ExpandProperty ProcessName"`,
+        (err, stdout) => {
+          if (err || !stdout) { done(); return; }
+
+          const lines = stdout.split('\r\n').map(l => l.trim().toLowerCase()).filter(Boolean);
+          const toKill = lines.filter(name => !whitelist.some(w => name.includes(w)));
+
+          if (toKill.length === 0) { done(); return; }
+
+          console.log('[SecureBrowser] Auto-closing Windows GUI processes:', toKill);
+
+          // Batch-kill all in a single taskkill call via PowerShell to avoid spawning N processes
+          const killCmd = toKill.map(n => `taskkill /F /IM "${n}.exe"`).join(' & ');
+          exec(killCmd, () => done());
         }
-        
-        const lines = stdout.split('\r\n').map(l => l.trim().toLowerCase()).filter(Boolean);
-        const toKill = lines.filter(name => !whitelist.some(w => name.includes(w)));
-        
-        if (toKill.length === 0) {
-          resolve();
-          return;
-        }
-        
-        console.log('[SecureBrowser] Auto-closing Windows GUI processes:', toKill);
-        
-        let killedCount = 0;
-        toKill.forEach((procName) => {
-          exec(`taskkill /F /IM "${procName}.exe"`, () => {
-            killedCount++;
-            if (killedCount === toKill.length) {
-              resolve();
-            }
-          });
-        });
-      });
+      );
     } else if (process.platform === 'darwin') {
-      const appleScript = `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`;
+      // Fire all pkill calls in parallel — no blocking osascript calls
+      const killTargets = [
+        'Google Chrome', 'Brave Browser', 'Microsoft Edge', 'Firefox', 'Safari',
+        'Opera', 'Vivaldi', 'Arc', 'Slack', 'zoom.us', 'Discord', 'Microsoft Teams',
+        'Telegram', 'WhatsApp', 'Skype', 'TeamViewer', 'AnyDesk', 'obs',
+      ];
 
-      exec(appleScript, (err, stdout) => {
-        const apps = stdout && !err ? stdout.split(',').map((a) => a.trim()).filter(Boolean) : [];
-        const whitelist = [
-          'Finder',
-          'BluebirdsSecureBrowser',
-          'bluebirds-secure-browser',
-          'Electron',
-        ];
+      let pending = killTargets.length;
+      const check = (): void => {
+        pending--;
+        if (pending <= 0) done();
+      };
 
-        const toClose = apps.filter(
-          (name) =>
-            !whitelist.some(
-              (w) => name.toLowerCase() === w.toLowerCase() || name.toLowerCase().includes('bluebirds')
-            )
-        );
-
-        // In addition, ALWAYS enforce POSIX-level killing of known third-party browsers and communication tools:
-        const targetKillList = [
-          'Google Chrome', 'chrome', 'Brave Browser', 'brave', 'Microsoft Edge', 'msedge',
-          'Firefox', 'firefox', 'Safari', 'Opera', 'Vivaldi', 'Arc',
-          'Slack', 'slack', 'zoom.us', 'zoom', 'Discord', 'discord', 'Microsoft Teams', 'teams',
-          'Telegram', 'WhatsApp', 'Skype'
-        ];
-
-        targetKillList.forEach((proc) => {
-          exec(`pkill -9 -i -f "${proc}"`, () => {});
-        });
-
-        if (toClose.length === 0) {
-          resolve();
-          return;
-        }
-
-        console.log('[SecureBrowser] Auto-closing macOS GUI apps:', toClose);
-
-        let closedCount = 0;
-        toClose.forEach((appName) => {
-          exec(`osascript -e 'tell application "${appName}" to quit'`, () => {
-            exec(`pkill -9 -i -f "${appName}"`, () => {
-              closedCount++;
-              if (closedCount >= toClose.length) resolve();
-            });
-          });
-        });
+      killTargets.forEach((proc) => {
+        exec(`pkill -9 -i -x "${proc}" 2>/dev/null; pkill -9 -i -f "${proc}" 2>/dev/null`, check);
       });
     } else {
-      resolve();
+      done();
     }
   });
 }
+
 
 /** Checks for monitor count, blacklisted apps, and VM state on launch. Offers options to auto-close. */
 async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolean> {
@@ -1542,8 +1627,14 @@ ipcMain.on('overlay-request-close', (): void => {
     console.log('[SecureBrowser] Forwarding close confirmation request to webContents in-app modal.');
     mainWindow.webContents.send('show-close-confirmation');
   } else {
-    app.quit();
+    performCleanExit();
   }
+});
+
+// Splash screen cancel/exit button
+ipcMain.on('splash-cancel-exit', (): void => {
+  console.log('[SecureBrowser] Splash cancel/exit requested by user.');
+  performCleanExit();
 });
 
 ipcMain.on('exam-started', (): void => {
@@ -1581,8 +1672,17 @@ async function initializeApp(): Promise<void> {
   if (isInitialized) return;
   isInitialized = true;
 
+  // Register emergency exit shortcut FIRST — before any blocking operations.
+  // This ensures Cmd+L / Ctrl+Shift+L can exit the app even during a stuck splash.
+  registerEmergencyExitShortcut();
+
+  // Windows: apply keyboard lockdown immediately so the WinKey is blocked from
+  // the very first frame of the app's lifecycle (not just after exam-started).
+  if (process.platform === 'win32' && !IS_DEV) {
+    startWindowsKeyboardLock();
+  }
+
   // Show splash immediately so the user sees something while system checks run.
-  // Bring to foreground before any blocking dialog (checkAndCleanSystem uses sync dialogs).
   createSplashWindow();
   if (splashWindow) {
     splashWindow.show();
@@ -1602,6 +1702,7 @@ async function initializeApp(): Promise<void> {
   startWifiMonitor();
   console.log('[SecureBrowser] Application initialized. High-impact security hooks deferred to exam start.');
 }
+
 
 function handleDeepLink(urlStr: string): void {
   console.log(`[SecureBrowser] Deep link received: ${urlStr}`);
