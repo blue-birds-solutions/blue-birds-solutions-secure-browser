@@ -10,8 +10,18 @@ try {
     token: string | null;
   };
   if (bootTokens?.token) {
-    localStorage.setItem('accessToken', bootTokens.token);
-    console.log('[SecureBrowser Preload] Boot token injected into localStorage.');
+    const saveTokens = () => {
+      try {
+        localStorage.setItem('accessToken', bootTokens.token!);
+        sessionStorage.setItem('accessToken', bootTokens.token!);
+      } catch {}
+    };
+    saveTokens();
+    const _win: any = (globalThis as any).window || (globalThis as any);
+    if (_win && typeof _win.addEventListener === 'function') {
+      _win.addEventListener('DOMContentLoaded', saveTokens);
+    }
+    console.log('[SecureBrowser Preload] Boot token injected into storage.');
   }
 } catch (e) {
   console.warn('[SecureBrowser Preload] Failed to inject boot token:', e);

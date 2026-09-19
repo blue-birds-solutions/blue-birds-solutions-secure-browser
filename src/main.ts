@@ -188,9 +188,13 @@ function createWindow(): void {
     (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
 
   const targetId = activeAttemptId || activeAssessmentId;
-  const initialUrl = targetId
+  let initialUrl = targetId
     ? `${origin}/system-check/${targetId}`
     : origin;
+
+  if (targetId && activeToken) {
+    initialUrl += `?token=${encodeURIComponent(activeToken)}`;
+  }
 
   console.log(`[SecureBrowser] Loading initial URL: ${initialUrl}`);
   mainWindow.loadURL(initialUrl);
@@ -1330,21 +1334,21 @@ function handleDeepLink(urlStr: string): void {
       (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
 
     const targetId = activeAttemptId || activeAssessmentId;
-    if (targetId && activeToken) {
-      const systemCheckUrl = `${origin}/system-check/${targetId}`;
+    if (targetId) {
+      let systemCheckUrl = `${origin}/system-check/${targetId}`;
+      if (activeToken) {
+        systemCheckUrl += `?token=${encodeURIComponent(activeToken)}`;
+      }
       console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
 
-      // Navigate to origin first to ensure same-origin localStorage access
-      mainWindow.loadURL(origin).then((): void => {
-        if (!mainWindow) return;
+      if (activeToken) {
         mainWindow.webContents
           .executeJavaScript(
-            `try { localStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
+            `try { localStorage.setItem('accessToken', '${activeToken}'); sessionStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
           )
-          .then((): void => {
-            mainWindow?.loadURL(systemCheckUrl);
-          });
-      });
+          .catch(() => {});
+      }
+      mainWindow.loadURL(systemCheckUrl);
     }
 
     // Bring to foreground
