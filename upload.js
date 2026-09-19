@@ -76,6 +76,8 @@ function getContentType(filename) {
       return 'text/yaml';
     case '.dmg':
       return 'application/x-apple-diskimage';
+    case '.zip':
+      return 'application/zip';
     case '.exe':
       return 'application/x-msdownload';
     case '.blockmap':
@@ -122,7 +124,7 @@ async function main() {
   // Upload only files matching installer extensions or metadata
   const targetFiles = files.filter(file => {
     const ext = path.extname(file).toLowerCase();
-    return ['.dmg', '.exe', '.yml', '.blockmap'].includes(ext);
+    return ['.dmg', '.exe', '.yml', '.blockmap', '.zip'].includes(ext);
   });
 
   if (targetFiles.length === 0) {

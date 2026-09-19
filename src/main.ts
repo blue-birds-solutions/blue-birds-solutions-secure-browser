@@ -301,23 +301,11 @@ function createWindow(): void {
 
       if (!IS_DEV) {
         // ── Resilient overlay show loop ─────────────────────────────────────
-        // On macOS, kiosk mode moves the window to a native fullscreen Space.
-        // The 'enter-full-screen' event may fire before the Space transition
-        // settles, causing the overlay to appear on the OLD desktop Space
-        // (invisible to the user). We fix this by retrying every 500 ms for
-        // up to 10 seconds. Once the overlay is confirmed visible on the
-        // correct Space, we stop retrying.
-        // If on an assessment page (/quiz/* or /system-check/*), hide the overlay.
         let retryCount = 0;
         const MAX_RETRIES = 20; // 20 × 500ms = 10 seconds
         const showOverlayRetry = setInterval((): void => {
           if (!overlayWindow || overlayWindow.isDestroyed()) {
             clearInterval(showOverlayRetry);
-            return;
-          }
-          const currentUrl = mainWindow?.webContents?.getURL() || '';
-          if (currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/')) {
-            overlayWindow.hide();
             return;
           }
           retryCount++;
@@ -333,36 +321,21 @@ function createWindow(): void {
           }
         }, 500);
 
-        // Additionally, keep re-asserting alwaysOnTop every 2 seconds forever
-        // so kiosk mode cannot bury the overlay if focus bounces (when not on an assessment page).
+        // Keep re-asserting alwaysOnTop every 2 seconds so kiosk mode cannot bury the HUD.
         setInterval((): void => {
           if (overlayWindow && !overlayWindow.isDestroyed()) {
-            const currentUrl = mainWindow?.webContents?.getURL() || '';
-            if (currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/')) {
-              if (overlayWindow.isVisible()) overlayWindow.hide();
-            } else {
-              overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-              overlayWindow.moveTop();
-            }
+            overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+            overlayWindow.moveTop();
           }
         }, 2000);
       }
     }
   });
 
-  // ── macOS native fullscreen Space transition ──────────────────────────────
-  // 'enter-full-screen' fires AFTER macOS finishes animating the window into
-  // its own Space. Re-assert overlay here as an additional safety net.
   mainWindow.on('enter-full-screen', (): void => {
     if (overlayWindow && !overlayWindow.isDestroyed()) {
-      // Give the Space animation a brief moment to settle (500ms)
       setTimeout((): void => {
         if (!overlayWindow || overlayWindow.isDestroyed()) return;
-        const currentUrl = mainWindow?.webContents?.getURL() || '';
-        if (currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/')) {
-          overlayWindow.hide();
-          return;
-        }
         syncOverlayPosition();
         overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
         overlayWindow.show();
@@ -381,15 +354,11 @@ function createWindow(): void {
     updateOverlayVisibility();
   });
 
-  // Re-assert overlay whenever the main window gains focus so kiosk cannot bury it.
   mainWindow.on('focus', (): void => {
     mainWindow?.webContents.send('window-focus');
-    const currentUrl = mainWindow?.webContents?.getURL() || '';
-    if (!currentUrl.includes('/quiz/') && !currentUrl.includes('/system-check/')) {
-      if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-        overlayWindow.moveTop();
-      }
+    if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+      overlayWindow.moveTop();
     }
     // When returning focus after a permission request, check if permission
     // has now been granted. If so, restore full lockout automatically.
@@ -568,22 +537,22 @@ function sendUpdateStatus(payload: UpdateStatusPayload): void {
 
 // ─── Overlay Window ─────────────────────────────────────────────────────────────
 
+const OVERLAY_WIDTH = 320;
+const OVERLAY_HEIGHT = 44;
+const OVERLAY_MARGIN = 18;
+
 function createOverlayWindow(): void {
-  // Use physical screen bounds so the bar spans the full screen width
-  // even when the Dock/menu bar is on a side.
   const { bounds } = screen.getPrimaryDisplay();
   console.log(`[SecureBrowser] Primary display bounds: x=${bounds.x} y=${bounds.y} w=${bounds.width} h=${bounds.height}`);
 
-  // ── Standalone window — NO parent relationship ───────────────────────────
-  // macOS parent-child semantics on kiosk+fullscreen windows are unreliable:
-  // a child added before the parent enters fullscreen stays on the old Space.
-  // We use setVisibleOnAllWorkspaces(true, {visibleOnFullScreen:true}) so macOS
-  // renders it in every Space including native fullscreen ones.
+  const x = bounds.x + bounds.width - OVERLAY_WIDTH - OVERLAY_MARGIN;
+  const y = bounds.y + bounds.height - OVERLAY_HEIGHT - OVERLAY_MARGIN;
+
   overlayWindow = new BrowserWindow({
-    width: bounds.width,
-    height: 44,
-    x: bounds.x,
-    y: bounds.y,
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+    x,
+    y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -594,7 +563,7 @@ function createOverlayWindow(): void {
     acceptFirstMouse: true,
 
     hasShadow: false,
-    show: false,        // Hidden until the retry loop shows it after ready-to-show
+    show: false,
     type: 'panel',      // 'panel' windows float above kiosk/fullscreen on macOS
     webPreferences: {
       nodeIntegration: true,    // Trusted local file — IPC via require('electron')
@@ -614,8 +583,6 @@ function createOverlayWindow(): void {
     });
   }
 
-  // This is the key call: tells macOS this window must appear in ALL Spaces
-  // including native fullscreen ones — without needing a parent relationship.
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   const overlayPath = path.join(__dirname, '..', 'src', 'overlay.html');
@@ -625,37 +592,27 @@ function createOverlayWindow(): void {
     overlayWindow = null;
   });
 
-  console.log('[SecureBrowser] Overlay window created (standalone, all-workspaces, panel type).');
+  console.log('[SecureBrowser] Native bottom-right HUD pill created (standalone, all-workspaces, panel type).');
 }
 
 
-/** Keep overlay bar pinned to the absolute top of the physical screen. */
+/** Keep native HUD pill pinned to the bottom-right of the physical screen. */
 function syncOverlayPosition(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
   const { bounds } = screen.getPrimaryDisplay();
-  // Always use physical screen x:0, y:0 and full physical width.
-  // In kiosk/fullscreen mode the main window covers the whole screen so the
-  // overlay should too.  workAreaSize excludes the Dock which we do NOT want.
-  overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: 44 });
+  const x = bounds.x + bounds.width - OVERLAY_WIDTH - OVERLAY_MARGIN;
+  const y = bounds.y + bounds.height - OVERLAY_HEIGHT - OVERLAY_MARGIN;
+  overlayWindow.setBounds({ x, y, width: OVERLAY_WIDTH, height: OVERLAY_HEIGHT });
 }
 
-/** Shows or hides the Electron overlay depending on whether the candidate is on an in-app assessment page */
+/** Ensures the native bottom-right HUD pill remains visible across all routes */
 function updateOverlayVisibility(): void {
   if (!overlayWindow || overlayWindow.isDestroyed() || !mainWindow || mainWindow.isDestroyed()) return;
-  const currentUrl = mainWindow.webContents.getURL() || '';
-  const isAssessmentOrCheck = currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/');
-  if (isAssessmentOrCheck) {
-    if (overlayWindow.isVisible()) {
-      overlayWindow.hide();
-      console.log('[SecureBrowser] Hiding overlay window for assessment route:', currentUrl);
-    }
-  } else {
-    if (!overlayWindow.isVisible()) {
-      overlayWindow.show();
-      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-      overlayWindow.moveTop();
-      syncOverlayPosition();
-    }
+  syncOverlayPosition();
+  if (!overlayWindow.isVisible()) {
+    overlayWindow.show();
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+    overlayWindow.moveTop();
   }
 }
 
@@ -902,20 +859,23 @@ function stopWindowsKeyboardLock(): void {
  * during app initialisation and survives unregisterGlobalShortcuts() calls.
  */
 function registerEmergencyExitShortcut(): void {
-  const shortcut = process.platform === 'darwin' ? 'CommandOrControl+L' : 'CommandOrControl+Shift+L';
-  try {
-    const registered = globalShortcut.register(shortcut, (): void => {
-      console.log('[SecureBrowser] Emergency exit shortcut triggered — performing clean shutdown.');
-      performCleanExit();
-    });
-    if (registered) {
-      console.log(`[SecureBrowser] Emergency exit shortcut registered: ${shortcut}`);
-    } else {
-      console.warn(`[SecureBrowser] Emergency exit shortcut already registered or in use: ${shortcut}`);
+  const shortcuts = process.platform === 'darwin'
+    ? ['Command+Q', 'Command+Shift+Q', 'Command+L']
+    : ['CommandOrControl+Shift+L', 'Alt+F4'];
+
+  for (const shortcut of shortcuts) {
+    try {
+      const registered = globalShortcut.register(shortcut, (): void => {
+        console.log(`[SecureBrowser] Emergency exit shortcut triggered (${shortcut}) — performing clean shutdown.`);
+        performCleanExit();
+      });
+      if (registered) {
+        console.log(`[SecureBrowser] Emergency exit shortcut registered: ${shortcut}`);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[SecureBrowser] Could not register emergency exit shortcut ${shortcut}:`, msg);
     }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn('[SecureBrowser] Could not register emergency exit shortcut:', msg);
   }
 }
 
@@ -1011,44 +971,58 @@ function parseProcessNames(stdout: string, isWindows: boolean): string[] {
  *  - Electron/app own helpers: chrome_crashpad_handler, bluebirds, securebrowser
  */
 function isSystemDaemon(proc: string): boolean {
-  // Path-based whitelist (macOS system directories)
+  const p = proc.toLowerCase().trim();
+
+  // Path-based whitelist (macOS & system directories)
   if (
-    proc.startsWith('/system/') ||
-    proc.startsWith('/usr/libexec/') ||
-    proc.startsWith('/usr/sbin/') ||
-    proc.startsWith('/usr/bin/') ||
-    proc.startsWith('/sbin/') ||
-    proc.startsWith('/bin/')
+    p.startsWith('/system/') ||
+    p.startsWith('/usr/libexec/') ||
+    p.startsWith('/usr/sbin/') ||
+    p.startsWith('/usr/bin/') ||
+    p.startsWith('/sbin/') ||
+    p.startsWith('/bin/') ||
+    p.includes('/system/library/') ||
+    p.includes('/library/apple/') ||
+    p.includes('/privateframeworks/')
   ) {
     return true;
   }
 
   // Reverse-DNS Apple bundle ID style names
-  if (proc.startsWith('com.apple.') || proc.startsWith('com.google.chrome.')) {
-    // Note: com.google.chrome.* are Chrome helper daemons; Chrome itself is matched by display name.
-    // We whitelist the daemon sub-processes but NOT 'google chrome' app itself.
-    if (proc.startsWith('com.apple.')) return true;
+  if (p.startsWith('com.apple.') || p.startsWith('com.google.chrome.')) {
+    if (p.startsWith('com.apple.')) return true;
   }
 
   // Name-based whitelist: known daemon base names that substring-match blacklist words
   const daemonBasenames = [
     'chrome_crashpad_handler',   // Electron/Chrome internal crash reporter
-    'searchpartyd',              // Would match 'arc' via substring
-    'trialarchivingservice',     // Would match 'arc' via substring
-    'passcodesettingssubscriber', // Would match 'code' via substring
-    'com.apple.safebrowsing',    // Would match 'safari' via substring
-    'safebrowsing',              // Would match 'safari'
+    'searchpartyd',              // Apple Find My / SearchParty daemon
+    'searchpartyuseragent',      // Apple SearchParty user agent
+    'findmy',                    // Apple Find My service
+    'findmyd',                   // Apple Find My daemon
+    'trialarchivingservice',     // macOS system service
+    'passcodesettingssubscriber', // macOS passcode subscriber
+    'com.apple.safebrowsing',    // Apple Safe Browsing
+    'safebrowsing',              // Apple Safe Browsing
     'softwareupdate',            // OS update daemon
     'securityd',                 // macOS security daemon
     'codesign',                  // Apple code signing tool (not VS Code)
-    'codesigninghelper',         // Would match 'code'
-    'ksfetch',                   // Google Software Update (not Chrome app)
-    'keyboardservicesd',         // Would match 'code' indirectly
-    'diskspacediagnostic',       // Would match 'discord' partially
+    'codesigninghelper',         // Apple codesigning helper
+    'ksfetch',                   // Google Software Update daemon (not Chrome app)
+    'keyboardservicesd',         // Apple keyboard services daemon
+    'diskspacediagnostic',       // Apple diagnostic daemon
+    'cloudd',                    // Apple iCloud daemon
+    'bird',                      // Apple iCloud Documents daemon
+    'identityservicesd',         // Apple IDS daemon
+    'rapportd',                  // Apple device communication daemon
   ];
 
-  const basename = proc.includes('/') ? proc.split('/').pop()! : proc;
-  if (daemonBasenames.some((d) => basename === d || basename.startsWith(d))) {
+  const basename = (p.includes('/') ? p.split('/').pop()! : p).toLowerCase();
+  if (
+    daemonBasenames.some((d) => basename === d || basename.startsWith(d)) ||
+    basename.startsWith('searchparty') ||
+    basename.startsWith('findmy')
+  ) {
     return true;
   }
 
@@ -1784,13 +1758,44 @@ ipcMain.on('close-browser', (_event: IpcMainEvent): void => {
   app.quit();
 });
 
-// Overlay close button — request renderer to show in-app confirmation modal (avoids window blur violation)
-ipcMain.on('overlay-request-close', (): void => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    console.log('[SecureBrowser] Forwarding close confirmation request to webContents in-app modal.');
-    mainWindow.webContents.send('show-close-confirmation');
+// Overlay close button — show native dialog box to cleanly confirm exit
+ipcMain.on('overlay-request-close', async (): Promise<void> => {
+  console.log('[SecureBrowser] overlay-request-close received from native HUD.');
+
+  if (isExamActive && mainWindow && !mainWindow.isDestroyed()) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: 'Exit Secure Browser',
+      message: 'Are you sure you want to exit the examination?',
+      detail: 'If you exit now, your assessment will remain in-progress and must be completed before the deadline. Do you wish to quit the application?',
+      buttons: ['Return to Exam', 'Exit App'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+
+    if (response === 1) {
+      console.log('[SecureBrowser] User confirmed exit from native HUD during exam.');
+      performCleanExit();
+    }
   } else {
-    performCleanExit();
+    const opts: Electron.MessageBoxOptions = {
+      type: 'question',
+      title: 'Exit Secure Browser',
+      message: 'Do you want to quit the Secure Browser application?',
+      buttons: ['Cancel', 'Quit App'],
+      defaultId: 1,
+      cancelId: 0,
+      noLink: true,
+    };
+    const { response } = mainWindow && !mainWindow.isDestroyed()
+      ? await dialog.showMessageBox(mainWindow, opts)
+      : await dialog.showMessageBox(opts);
+
+    if (response === 1) {
+      console.log('[SecureBrowser] User confirmed exit from native HUD.');
+      performCleanExit();
+    }
   }
 });
 
