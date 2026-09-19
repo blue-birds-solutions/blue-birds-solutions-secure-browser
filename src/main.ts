@@ -13,7 +13,7 @@ import {
   shell,
 } from 'electron';
 import path from 'path';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import https from 'https';
 import { autoUpdater } from 'electron-updater';
 
@@ -39,8 +39,15 @@ interface SystemStatus {
 const IS_DEV: boolean =
   process.env.NODE_ENV === 'development' || process.argv.includes('--dev');
 
-/** Blacklisted processes: remote control, screen capture, communication, and sharing tools. */
+// Enforce hardening flags in production to prevent remote debugging & script injection
+if (!IS_DEV) {
+  app.commandLine.appendSwitch('disable-remote-debugging');
+  app.commandLine.appendSwitch('disable-remote-extensions');
+}
+
+/** Blacklisted processes: remote control, screen capture, communication, reverse engineering & cheat tools. */
 const BLACKLIST: readonly string[] = [
+  // Communication & Meeting Tools
   'discord',
   'zoom',
   'skype',
@@ -73,6 +80,32 @@ const BLACKLIST: readonly string[] = [
   'tightvnc',
   'ultravnc',
   'realvnc',
+
+  // Anti-Reverse Engineering, Debuggers, Decompilers & Macro Cheat Engines
+  'cheatengine',
+  'cheatengine-x86_64',
+  'cheatengine-i386',
+  'x64dbg',
+  'x32dbg',
+  'ida',
+  'ida64',
+  'idag',
+  'idag64',
+  'processhacker',
+  'procmon',
+  'procmon64',
+  'procexp',
+  'procexp64',
+  'wireshark',
+  'fiddler',
+  'charles',
+  'autohotkey',
+  'autoit3',
+  'dnspy',
+  'httpdebugger',
+  'ghidra',
+  'scylla',
+  'ollydbg',
 ];
 
 /** Virtual machine processes/drivers to detect virtualized environments. */
@@ -343,9 +376,13 @@ function createWindow(): void {
     }
   });
 
-  // Open DevTools only in developer mode
+  // Open DevTools only in developer mode; proactively close if opened in production
   if (IS_DEV) {
     mainWindow.webContents.openDevTools();
+  } else {
+    mainWindow.webContents.on('devtools-opened', () => {
+      mainWindow?.webContents.closeDevTools();
+    });
   }
 
   // Force window focus back to the app when it loses focus (production only).
@@ -382,8 +419,13 @@ function createWindow(): void {
     const key: string = input.key.toLowerCase();
     const cmdOrCtrl: boolean = input.meta || input.control;
 
-    // Block DevTools shortcuts: F12, Ctrl+Shift+I, Cmd+Option+I
-    if (key === 'f12' || (cmdOrCtrl && input.shift && key === 'i')) {
+    // Block DevTools & inspection shortcuts: F12, PrintScreen, Ctrl+Shift+I/J/C, Ctrl+U
+    if (
+      key === 'f12' ||
+      key === 'printscreen' ||
+      (cmdOrCtrl && input.shift && (key === 'i' || key === 'j' || key === 'c')) ||
+      (cmdOrCtrl && key === 'u')
+    ) {
       _event.preventDefault();
     }
 
@@ -481,6 +523,13 @@ function createOverlayWindow(): void {
 
   overlayWindow.setIgnoreMouseEvents(false);
   overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+
+  if (!IS_DEV) {
+    overlayWindow.setContentProtection(true);
+    overlayWindow.webContents.on('devtools-opened', () => {
+      overlayWindow?.webContents.closeDevTools();
+    });
+  }
 
   // This is the key call: tells macOS this window must appear in ALL Spaces
   // including native fullscreen ones — without needing a parent relationship.
@@ -604,6 +653,86 @@ function startWifiMonitor(): void {
   console.log('[SecureBrowser] WiFi monitor started.');
 }
 
+let keyboardLockChild: ReturnType<typeof spawn> | null = null;
+
+/**
+ * Windows Low-Level OS Lockdown:
+ * 1. Enables Explorer NoWinKeys policy via Windows Registry.
+ * 2. Spawns scripts/keyboard-lock.ps1 in a hidden background process
+ *    which installs WH_KEYBOARD_LL to intercept and suppress WinKey,
+ *    Alt+Tab, Alt+Esc, Ctrl+Esc, and Alt+Space before the OS or other apps see them.
+ */
+function startWindowsKeyboardLock(): void {
+  if (process.platform !== 'win32' || IS_DEV) return;
+
+  // 1. Set Registry Policy to disable Windows Keys
+  exec(
+    'reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer" /v NoWinKeys /t REG_DWORD /d 1 /f',
+    (err) => {
+      if (err) {
+        console.warn('[SecureBrowser] Failed to set NoWinKeys registry policy:', err);
+      } else {
+        console.log('[SecureBrowser] Successfully enabled NoWinKeys registry policy.');
+      }
+    }
+  );
+
+  // 2. Spawn low-level keyboard hook PowerShell script
+  try {
+    const scriptPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'scripts', 'keyboard-lock.ps1')
+      : path.join(__dirname, '..', 'scripts', 'keyboard-lock.ps1');
+
+    console.log('[SecureBrowser] Spawning Windows low-level keyboard hook:', scriptPath);
+    keyboardLockChild = spawn(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptPath,
+      ],
+      {
+        windowsHide: true,
+        stdio: 'ignore',
+      }
+    );
+
+    keyboardLockChild.on('error', (err) => {
+      console.warn('[SecureBrowser] Keyboard lock process error:', err);
+    });
+
+    keyboardLockChild.on('exit', (code) => {
+      console.log(`[SecureBrowser] Keyboard lock process exited with code ${code}`);
+      keyboardLockChild = null;
+    });
+  } catch (e) {
+    console.error('[SecureBrowser] Failed to spawn keyboard hook:', e);
+  }
+}
+
+function stopWindowsKeyboardLock(): void {
+  if (process.platform !== 'win32') return;
+
+  // 1. Reset / Delete Registry Policy
+  exec(
+    'reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer" /v NoWinKeys /f',
+    () => {}
+  );
+
+  // 2. Kill keyboard lock child process
+  if (keyboardLockChild) {
+    try {
+      keyboardLockChild.kill();
+    } catch {}
+    keyboardLockChild = null;
+  }
+}
+
 // ─── Global Shortcut Blocker ─────────────────────────────────────────────────
 
 function registerGlobalShortcuts(): void {
@@ -620,11 +749,16 @@ function registerGlobalShortcuts(): void {
       console.warn(`[SecureBrowser] Failed to block shortcut "${shortcut}": ${message}`);
     }
   }
+
+  // Windows: Start low-level keyboard hook and registry lockdown
+  startWindowsKeyboardLock();
+
   console.log('[SecureBrowser] Global lockdown shortcuts registered.');
 }
 
 function unregisterGlobalShortcuts(): void {
   globalShortcut.unregisterAll();
+  stopWindowsKeyboardLock();
   console.log('[SecureBrowser] Global lockdown shortcuts unregistered.');
 }
 
@@ -839,11 +973,6 @@ function closeAllOtherGUIApps(): Promise<void> {
         'explorer',
         'bluebirdssecurebrowser',
         'electron',
-        'chrome',
-        'msedge',
-        'firefox',
-        'opera',
-        'brave'
       ];
       
       const psCommand = `powershell -Command "Get-Process | Where-Object {$_.mainWindowTitle -ne ''} | Select-Object -Unique -ExpandProperty ProcessName"`;
@@ -889,12 +1018,6 @@ function closeAllOtherGUIApps(): Promise<void> {
           'BluebirdsSecureBrowser',
           'bluebirds-secure-browser',
           'Electron',
-          'Google Chrome',
-          'Safari',
-          'Firefox',
-          'Microsoft Edge',
-          'Opera',
-          'Brave Browser'
         ];
         
         const toClose = apps.filter(name => !whitelist.some(w => name.toLowerCase() === w.toLowerCase() || name.toLowerCase().includes('bluebirds')));
