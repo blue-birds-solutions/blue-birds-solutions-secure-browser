@@ -289,60 +289,43 @@ function createWindow(): void {
         mainWindow.focus();
         bringAppToFront();
       }
-      // In dev mode (no native fullscreen) sync overlay visibility.
-      if (IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
-        updateOverlayVisibility();
-      }
+
       // Close and destroy splash screen now that exam window is rendered and visible
       if (splashWindow && !splashWindow.isDestroyed()) {
         splashWindow.destroy();
         splashWindow = null;
       }
 
-      if (!IS_DEV) {
-        // ── Resilient overlay show loop ─────────────────────────────────────
-        let retryCount = 0;
-        const MAX_RETRIES = 20; // 20 × 500ms = 10 seconds
-        const showOverlayRetry = setInterval((): void => {
-          if (!overlayWindow || overlayWindow.isDestroyed()) {
-            clearInterval(showOverlayRetry);
-            return;
-          }
-          retryCount++;
-          syncOverlayPosition();
-          overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-          overlayWindow.show();
-          overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-          overlayWindow.moveTop();
-          console.log(`[SecureBrowser] Overlay show attempt ${retryCount}/${MAX_RETRIES}`);
-          if (retryCount >= MAX_RETRIES) {
-            clearInterval(showOverlayRetry);
-            console.log('[SecureBrowser] Overlay show retry loop complete.');
-          }
-        }, 500);
-
-        // Keep re-asserting alwaysOnTop every 2 seconds so kiosk mode cannot bury the HUD.
-        setInterval((): void => {
-          if (overlayWindow && !overlayWindow.isDestroyed()) {
-            overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-            overlayWindow.moveTop();
-          }
-        }, 2000);
+      // Show the overlay HUD — as a child window it will appear in the same
+      // kiosk/fullscreen space as mainWindow automatically.
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        syncOverlayPosition();
+        overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        overlayWindow.show();
+        console.log('[SecureBrowser] Child HUD overlay shown after mainWindow ready-to-show.');
       }
     }
   });
 
   mainWindow.on('enter-full-screen', (): void => {
+    // Child window follows automatically but re-assert position after a short
+    // delay because Cocoa re-layouts the frame when entering fullscreen.
     if (overlayWindow && !overlayWindow.isDestroyed()) {
       setTimeout((): void => {
         if (!overlayWindow || overlayWindow.isDestroyed()) return;
         syncOverlayPosition();
         overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
         overlayWindow.show();
-        overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-        overlayWindow.moveTop();
-        console.log('[SecureBrowser] Overlay re-asserted in enter-full-screen handler.');
-      }, 500);
+        console.log('[SecureBrowser] Child HUD position re-synced after enter-full-screen.');
+      }, 400);
+    }
+  });
+
+  mainWindow.on('resize', (): void => {
+    // Keep the HUD anchored to the bottom-right when the window is resized
+    // (important in dev mode and Windows windowed mode).
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      syncOverlayPosition();
     }
   });
 
@@ -541,18 +524,49 @@ const OVERLAY_WIDTH = 320;
 const OVERLAY_HEIGHT = 44;
 const OVERLAY_MARGIN = 18;
 
+/**
+ * Computes the absolute screen position for the HUD pill.
+ * When used as a child window the coordinates must be relative to the
+ * mainWindow's content frame (NOT the physical screen).
+ */
+function computeOverlayBoundsRelative(): { x: number; y: number; width: number; height: number } {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    const { bounds } = screen.getPrimaryDisplay();
+    return {
+      x: bounds.width - OVERLAY_WIDTH - OVERLAY_MARGIN,
+      y: bounds.height - OVERLAY_HEIGHT - OVERLAY_MARGIN,
+      width: OVERLAY_WIDTH,
+      height: OVERLAY_HEIGHT,
+    };
+  }
+  const mb = mainWindow.getBounds();
+  return {
+    x: mb.width - OVERLAY_WIDTH - OVERLAY_MARGIN,
+    y: mb.height - OVERLAY_HEIGHT - OVERLAY_MARGIN,
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+  };
+}
+
 function createOverlayWindow(): void {
-  const { bounds } = screen.getPrimaryDisplay();
-  console.log(`[SecureBrowser] Primary display bounds: x=${bounds.x} y=${bounds.y} w=${bounds.width} h=${bounds.height}`);
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    console.warn('[SecureBrowser] createOverlayWindow() called before mainWindow exists — skipping.');
+    return;
+  }
 
-  const x = bounds.x + bounds.width - OVERLAY_WIDTH - OVERLAY_MARGIN;
-  const y = bounds.y + bounds.height - OVERLAY_HEIGHT - OVERLAY_MARGIN;
+  const relBounds = computeOverlayBoundsRelative();
+  console.log(`[SecureBrowser] Creating child HUD at relative x=${relBounds.x} y=${relBounds.y}`);
 
+  // CRITICAL: parent: mainWindow attaches this window to the same macOS Display Space
+  // as mainWindow. Without this, kiosk mode isolates mainWindow to its own macOS
+  // Presentation Space and independent windows (even type:'panel') stay on the desktop
+  // space behind the fullscreen kiosk — becoming permanently invisible.
   overlayWindow = new BrowserWindow({
     width: OVERLAY_WIDTH,
     height: OVERLAY_HEIGHT,
-    x,
-    y,
+    x: relBounds.x,
+    y: relBounds.y,
+    parent: mainWindow,           // ← bind to same kiosk/fullscreen Display Space
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -561,10 +575,10 @@ function createOverlayWindow(): void {
     movable: false,
     focusable: false,
     acceptFirstMouse: true,
-
     hasShadow: false,
     show: false,
-    type: 'panel',      // 'panel' windows float above kiosk/fullscreen on macOS
+    // NOTE: do NOT use type:'panel' with a parent window — it conflicts with child-window
+    // Cocoa ordering and can cause the overlay to not appear in kiosk mode on Apple Silicon.
     webPreferences: {
       nodeIntegration: true,    // Trusted local file — IPC via require('electron')
       contextIsolation: false,
@@ -573,8 +587,6 @@ function createOverlayWindow(): void {
   });
 
   overlayWindow.setIgnoreMouseEvents(false);
-  overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-  overlayWindow.moveTop();
 
   if (!IS_DEV) {
     overlayWindow.setContentProtection(true);
@@ -583,6 +595,8 @@ function createOverlayWindow(): void {
     });
   }
 
+  // visibleOnFullScreen ensures the child window appears over the macOS fullscreen
+  // presentation layer (menubar hidden / Spaces switching disabled).
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   const overlayPath = path.join(__dirname, '..', 'src', 'overlay.html');
@@ -592,17 +606,15 @@ function createOverlayWindow(): void {
     overlayWindow = null;
   });
 
-  console.log('[SecureBrowser] Native bottom-right HUD pill created (standalone, all-workspaces, panel type).');
+  console.log('[SecureBrowser] Native child HUD pill created — bound to mainWindow kiosk space.');
 }
 
 
-/** Keep native HUD pill pinned to the bottom-right of the physical screen. */
+/** Keep native HUD pill pinned to the bottom-right corner of the parent (mainWindow). */
 function syncOverlayPosition(): void {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const { bounds } = screen.getPrimaryDisplay();
-  const x = bounds.x + bounds.width - OVERLAY_WIDTH - OVERLAY_MARGIN;
-  const y = bounds.y + bounds.height - OVERLAY_HEIGHT - OVERLAY_MARGIN;
-  overlayWindow.setBounds({ x, y, width: OVERLAY_WIDTH, height: OVERLAY_HEIGHT });
+  const rel = computeOverlayBoundsRelative();
+  overlayWindow.setBounds(rel);
 }
 
 /** Ensures the native bottom-right HUD pill remains visible across all routes */
@@ -611,8 +623,6 @@ function updateOverlayVisibility(): void {
   syncOverlayPosition();
   if (!overlayWindow.isVisible()) {
     overlayWindow.show();
-    overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-    overlayWindow.moveTop();
   }
 }
 
