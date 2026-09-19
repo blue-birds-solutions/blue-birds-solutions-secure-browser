@@ -579,9 +579,15 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
     const isWindows = process.platform === 'win32';
     let isResolved = false;
 
+    let autoWatchInterval: NodeJS.Timeout | null = null;
+
     const finalize = (result: boolean) => {
       if (isResolved) return;
       isResolved = true;
+      if (autoWatchInterval) {
+        clearInterval(autoWatchInterval);
+        autoWatchInterval = null;
+      }
       ipcMain.removeListener('prohibited-modal-auto-close', handleAutoClose);
       ipcMain.removeListener('prohibited-modal-recheck', handleRecheck);
       ipcMain.removeListener('prohibited-modal-quit', handleQuit);
@@ -595,7 +601,7 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
       for (const proc of forbiddenApps) {
         await killProcess(proc, isWindows);
       }
-      await new Promise((r) => setTimeout(r, 1200));
+      await new Promise((r) => setTimeout(r, 1000));
 
       const afterProcs = await getSystemProcesses(isWindows);
       const { forbiddenApps: remaining } = getRunningViolations(afterProcs);
@@ -608,7 +614,7 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
               prohibitedWindow.close();
             }
             finalize(true);
-          }, 1100);
+          }, 900);
         } else {
           finalize(true);
         }
@@ -632,7 +638,7 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
               prohibitedWindow.close();
             }
             finalize(true);
-          }, 1100);
+          }, 900);
         } else {
           finalize(true);
         }
@@ -649,6 +655,7 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
         prohibitedWindow.close();
       }
       finalize(false);
+      app.exit(0);
     };
 
     ipcMain.on('prohibited-modal-auto-close', handleAutoClose);
@@ -656,6 +663,40 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
     ipcMain.on('prohibited-modal-quit', handleQuit);
 
     createProhibitedWindow(initialForbiddenApps);
+
+    // Real-time background watchdog timer (like SafeExamBrowser's 250ms/1s GCD timer)
+    // If the candidate manually closes the apps outside, auto-detect and proceed
+    autoWatchInterval = setInterval(async () => {
+      if (isResolved || !prohibitedWindow || prohibitedWindow.isDestroyed()) {
+        if (autoWatchInterval) clearInterval(autoWatchInterval);
+        return;
+      }
+      try {
+        const procs = await getSystemProcesses(isWindows);
+        const { forbiddenApps: remaining } = getRunningViolations(procs);
+        if (remaining.length === 0) {
+          if (autoWatchInterval) {
+            clearInterval(autoWatchInterval);
+            autoWatchInterval = null;
+          }
+          if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+            prohibitedWindow.webContents.send('check-result', { clean: true, forbiddenApps: [] });
+            setTimeout(() => {
+              if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+                prohibitedWindow.close();
+              }
+              finalize(true);
+            }, 900);
+          } else {
+            finalize(true);
+          }
+        } else {
+          if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+            prohibitedWindow.webContents.send('check-result', { clean: false, forbiddenApps: remaining });
+          }
+        }
+      } catch {}
+    }, 1200);
 
     if (prohibitedWindow) {
       prohibitedWindow.on('closed', () => {
@@ -754,17 +795,17 @@ function stopHudMonitor(): void {
 
 const pingAgent = new https.Agent({
   keepAlive: true,
-  keepAliveMsecs: 1000,
-  maxSockets: 1,
+  keepAliveMsecs: 2000,
+  maxSockets: 8,
 });
 
 /**
  * Measures round-trip latency to the target server using a lightweight HTTPS HEAD
- * request. Returns the ms value on success, or null on failure/timeout.
+ * request with browser User-Agent. Returns the ms value on success, or null on failure/timeout.
  */
 function pingTarget(targetUrl: string): Promise<number | null> {
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => resolve(null), 5000);
+    const timeout = setTimeout(() => resolve(null), 6000);
     const start = Date.now();
 
     try {
@@ -779,12 +820,17 @@ function pingTarget(targetUrl: string): Promise<number | null> {
           path: '/favicon.ico',
           method: 'HEAD',
           agent: isHttps ? pingAgent : undefined,
-          headers: { 'Cache-Control': 'no-cache' },
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) BluebirdsSecureApp/1.1.22 Chrome/120.0.0.0 Safari/537.36',
+            'Cache-Control': 'no-cache',
+            'Accept': '*/*',
+          },
         },
         (res: http.IncomingMessage) => {
           clearTimeout(timeout);
           res.resume(); // Consume response to free socket back to agent pool
-          resolve(Date.now() - start);
+          // Any HTTP status (200, 304, 404, etc.) proves connectivity to the host
+          resolve(Math.max(1, Date.now() - start));
         },
       );
 
