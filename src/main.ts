@@ -954,9 +954,105 @@ function parseProcessNames(stdout: string, isWindows: boolean): string[] {
       .filter(Boolean);
   }
 
+  // On macOS, ps -ax -o comm= returns the full path or binary name.
+  // We keep the FULL path so the daemon whitelist can filter on path prefixes,
+  // but also compute the basename for blacklist matching.
   return lines
-    .map((line): string => path.basename(line.trim()).toLowerCase())
+    .map((line): string => line.trim().toLowerCase())
     .filter(Boolean);
+}
+
+/**
+ * Returns true when the process string is a known macOS/Windows OS daemon
+ * that must never be flagged as a violation, regardless of its name.
+ *
+ * Rules:
+ *  - Apple system daemons: paths under /System/, /usr/libexec/, /usr/sbin/
+ *  - Reverse-DNS Apple bundle identifiers: com.apple.*
+ *  - Known mis-matchable OS agents: searchpartyd, passcodesettings*, trialarchivingservice
+ *  - Electron/app own helpers: chrome_crashpad_handler, bluebirds, securebrowser
+ */
+function isSystemDaemon(proc: string): boolean {
+  // Path-based whitelist (macOS system directories)
+  if (
+    proc.startsWith('/system/') ||
+    proc.startsWith('/usr/libexec/') ||
+    proc.startsWith('/usr/sbin/') ||
+    proc.startsWith('/usr/bin/') ||
+    proc.startsWith('/sbin/') ||
+    proc.startsWith('/bin/')
+  ) {
+    return true;
+  }
+
+  // Reverse-DNS Apple bundle ID style names
+  if (proc.startsWith('com.apple.') || proc.startsWith('com.google.chrome.')) {
+    // Note: com.google.chrome.* are Chrome helper daemons; Chrome itself is matched by display name.
+    // We whitelist the daemon sub-processes but NOT 'google chrome' app itself.
+    if (proc.startsWith('com.apple.')) return true;
+  }
+
+  // Name-based whitelist: known daemon base names that substring-match blacklist words
+  const daemonBasenames = [
+    'chrome_crashpad_handler',   // Electron/Chrome internal crash reporter
+    'searchpartyd',              // Would match 'arc' via substring
+    'trialarchivingservice',     // Would match 'arc' via substring
+    'passcodesettingssubscriber', // Would match 'code' via substring
+    'com.apple.safebrowsing',    // Would match 'safari' via substring
+    'safebrowsing',              // Would match 'safari'
+    'softwareupdate',            // OS update daemon
+    'securityd',                 // macOS security daemon
+    'codesign',                  // Apple code signing tool (not VS Code)
+    'codesigninghelper',         // Would match 'code'
+    'ksfetch',                   // Google Software Update (not Chrome app)
+    'keyboardservicesd',         // Would match 'code' indirectly
+    'diskspacediagnostic',       // Would match 'discord' partially
+  ];
+
+  const basename = proc.includes('/') ? proc.split('/').pop()! : proc;
+  if (daemonBasenames.some((d) => basename === d || basename.startsWith(d))) {
+    return true;
+  }
+
+  // Whitelist the secure browser's own helpers
+  if (
+    basename.includes('bluebird') ||
+    basename.includes('securebrowser') ||
+    basename === 'electron'
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Returns true when process `proc` matches blacklist entry `black` using
+ * exact word-boundary matching instead of naive substring matching.
+ *
+ * Strategy:
+ *   - Extract the basename (binary filename without path).
+ *   - Match only if the blacklist term equals the basename exactly,
+ *     OR if the basename starts/ends with the term at a word boundary
+ *     (separated by a space, hyphen, dot, or underscore).
+ *   - This prevents 'arc' from matching 'trialarchivingservice'
+ *     and 'code' from matching 'com.apple.codesigninghelper'.
+ */
+function matchesBlacklist(proc: string, black: string): boolean {
+  const basename = (proc.includes('/') ? proc.split('/').pop()! : proc).toLowerCase();
+  const term = black.toLowerCase();
+
+  // Exact match (e.g. 'safari', 'code', 'arc')
+  if (basename === term) return true;
+
+  // Match with common executable suffixes (.exe, .app)
+  if (basename === `${term}.exe` || basename === `${term}.app`) return true;
+
+  // Word-boundary match: term must be surrounded by a non-word character or string boundary.
+  // Uses a regex to ensure the term isn't embedded inside a longer identifier.
+  // e.g. 'arc' matches 'arc browser' but NOT 'searchpartyd' or 'trialarchivingservice'
+  const wordBoundaryRegex = new RegExp(`(?<![a-z0-9])${term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![a-z0-9])`);
+  return wordBoundaryRegex.test(basename);
 }
 
 /**
@@ -965,20 +1061,25 @@ function parseProcessNames(stdout: string, isWindows: boolean): string[] {
  */
 function detectViolation(processes: string[]): SecurityStatus | null {
   for (const proc of processes) {
-    if (BLACKLIST.some((black) => proc.includes(black))) {
+    // Skip OS system daemons — they must never be flagged
+    if (isSystemDaemon(proc)) continue;
+
+    if (BLACKLIST.some((black) => matchesBlacklist(proc, black))) {
+      const basename = proc.includes('/') ? proc.split('/').pop()! : proc;
       return {
         hasViolation: true,
         type: 'blacklisted-app',
-        process: proc,
-        message: `Forbidden application running: "${proc}". Please close it to proceed with the test.`,
+        process: basename,
+        message: `Forbidden application running: "${basename}". Please close it to proceed with the test.`,
       };
     }
 
     if (VM_INDICATORS.some((vm) => proc.includes(vm))) {
+      const basename = proc.includes('/') ? proc.split('/').pop()! : proc;
       return {
         hasViolation: true,
         type: 'vm-detected',
-        process: proc,
+        process: basename,
         message: 'Virtual Machine environment detected. This test must be taken on physical hardware.',
       };
     }
@@ -1050,15 +1151,25 @@ function getSystemProcesses(isWindows: boolean): Promise<string[]> {
   });
 }
 
-/** Collect list of running blacklisted apps and detect VM presence. */
+/**
+ * Collect list of running blacklisted apps and detect VM presence.
+ * Uses exact word-boundary matching and filters out macOS OS daemons
+ * to prevent false positives from system processes.
+ */
 function getRunningViolations(processes: string[]): { forbiddenApps: string[]; vmDetected: boolean } {
   const forbiddenAppsSet = new Set<string>();
   let vmDetected = false;
 
   for (const proc of processes) {
+    // Skip OS daemons — never flag system processes
+    if (isSystemDaemon(proc)) continue;
+
+    const basename = proc.includes('/') ? proc.split('/').pop()! : proc;
+
     for (const black of BLACKLIST) {
-      if (proc.includes(black)) {
-        forbiddenAppsSet.add(proc);
+      if (matchesBlacklist(proc, black)) {
+        // Use the human-readable basename for the violation report
+        forbiddenAppsSet.add(basename);
       }
     }
 
@@ -1080,12 +1191,20 @@ function getRunningViolations(processes: string[]): { forbiddenApps: string[]; v
  */
 function killProcess(name: string, isWindows: boolean): Promise<void> {
   return new Promise((resolve) => {
+    // Safety check: NEVER kill system daemons!
+    if (isSystemDaemon(name)) {
+      console.warn(`[SecureBrowser] Refusing to kill protected system daemon: ${name}`);
+      resolve();
+      return;
+    }
+
     // /T = terminate process and all of its children (process tree kill)
+    // On macOS: use exact-name match or app bundle match, not broad substring
     const cmd = isWindows
       ? `taskkill /F /T /IM "${name}"`
-      : `pkill -9 -f -i "${name}"`;
+      : `pkill -9 -i -x "${name}" 2>/dev/null || pkill -9 -i -f "${name}.app" 2>/dev/null`;
 
-    console.log(`[SecureBrowser] Force-closing process tree: ${name} (cmd: ${cmd})`);
+    console.log(`[SecureBrowser] Force-closing process: ${name} (cmd: ${cmd})`);
     exec(cmd, (err) => {
       if (err) {
         // Error code 128 means process not found — acceptable if already closed
@@ -1247,27 +1366,33 @@ async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolea
   }
 
   if (forbiddenApps.length > 0) {
-    const appList = forbiddenApps.map((a) => `  • ${a}`).join('\n');
-    const choice = showModalDialog(parentWindow, {
-      type: 'warning',
-      title: 'Forbidden Applications Running',
-      message: `The following forbidden applications are currently running on your system:\n\n${appList}\n\nThey must be closed before you can enter the assessment.\n\nWould you like the Secure Browser to force close them for you?`,
-      buttons: ['Force Close All', 'Quit Secure Browser'],
-      defaultId: 0,
-      cancelId: 1,
-    });
-
-    if (choice === 0) {
-      // Force kill each app
-      for (const proc of forbiddenApps) {
-        await killProcess(proc, isWindows);
-      }
-      // Give system processes a short delay to terminate completely
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      // Re-evaluate recursively
-      return checkAndCleanSystem(parentWindow);
+    console.log('[SecureBrowser] Auto-closing detected forbidden apps pre-launch:', forbiddenApps);
+    for (const proc of forbiddenApps) {
+      await killProcess(proc, isWindows);
     }
-    return false;
+    // Give terminated apps a moment to exit completely
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+
+    // Re-check running processes
+    const remainingProcesses = await getSystemProcesses(isWindows);
+    const { forbiddenApps: remaining } = getRunningViolations(remainingProcesses);
+
+    if (remaining.length > 0) {
+      const appList = remaining.map((a) => `  • ${a}`).join('\n');
+      const choice = showModalDialog(parentWindow, {
+        type: 'warning',
+        title: 'Forbidden Applications Running',
+        message: `The following applications could not be terminated automatically:\n\n${appList}\n\nThey must be closed before entering the assessment.\n\nWould you like to retry or exit?`,
+        buttons: ['Retry / Recheck', 'Quit Secure Browser'],
+        defaultId: 0,
+        cancelId: 1,
+      });
+
+      if (choice === 0) {
+        return checkAndCleanSystem(parentWindow);
+      }
+      return false;
+    }
   }
 
   return true;
