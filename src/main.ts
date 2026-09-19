@@ -90,8 +90,13 @@ const VM_INDICATORS: readonly string[] = [
 const BLOCKED_SHORTCUTS: readonly string[] = [
   'Alt+Tab',
   'Alt+F4',
+  'Alt+Escape',
+  'Alt+Space',
   'Command+Tab',
   'Command+Alt+Escape',
+  'Command+Space',
+  'Ctrl+Escape',
+  'Ctrl+Shift+Escape',
   'Ctrl+Alt+Delete',
 ];
 
@@ -170,7 +175,7 @@ function createWindow(): void {
     fullscreen: !IS_DEV,
     kiosk: !IS_DEV,        // Locks user into foreground, intercepts OS commands
     alwaysOnTop: !IS_DEV,
-    skipTaskbar: !IS_DEV,
+    skipTaskbar: !IS_DEV && process.platform === 'darwin',
     frame: IS_DEV,         // No title bar/frame in production
     icon: path.join(__dirname, '..', 'desktop_icon_256x256.ico'),
     webPreferences: {
@@ -213,9 +218,13 @@ function createWindow(): void {
   // Show window only when content is ready (prevents white flash)
   mainWindow.once('ready-to-show', (): void => {
     if (mainWindow) {
+      if (process.platform === 'win32') {
+        const primaryDisplay = screen.getPrimaryDisplay();
+        mainWindow.setBounds(primaryDisplay.bounds);
+      }
       mainWindow.show();
       if (!IS_DEV) {
-        mainWindow.setAlwaysOnTop(true, 'screen-saver');
+        mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
         mainWindow.focus();
         bringAppToFront();
       }
@@ -344,6 +353,11 @@ function createWindow(): void {
   // that is when the user needs to interact with a macOS dialog or System Settings.
   mainWindow.on('blur', (): void => {
     if (!IS_DEV && mainWindow && !isRequestingPermission) {
+      if (process.platform === 'win32') {
+        mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+        mainWindow.moveTop();
+        mainWindow.show();
+      }
       mainWindow.focus();
       mainWindow.webContents.send('window-blur');
     } else if (!IS_DEV && mainWindow && isRequestingPermission) {
@@ -378,11 +392,17 @@ function createWindow(): void {
       _event.preventDefault();
     }
 
-    // Block OS-level shortcuts: Alt+F4, Alt+Tab, Cmd+Alt+Esc
+    // Block OS-level shortcuts & keys that switch tasks / expose desktop:
+    // Alt+F4, Alt+Tab, Alt+Esc, Alt+Space, Ctrl+Esc, Ctrl+Shift+Esc, Windows / Command key
     if (
       (input.alt && key === 'f4') ||
       (input.alt && key === 'tab') ||
-      (cmdOrCtrl && input.alt && key === 'escape')
+      (input.alt && key === 'escape') ||
+      (input.alt && key === ' ') ||
+      (input.control && key === 'escape') ||
+      (input.control && input.shift && key === 'escape') ||
+      (cmdOrCtrl && input.alt && key === 'escape') ||
+      input.meta
     ) {
       _event.preventDefault();
     }
@@ -787,6 +807,12 @@ function showModalDialog(
  */
 function bringAppToFront(): void {
   app.focus({ steal: true });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+    mainWindow.moveTop();
+    mainWindow.show();
+    mainWindow.focus();
+  }
   if (process.platform === 'darwin') {
     // AppleScript activate is the most reliable foreground steal on macOS.
     // It works even when the app hasn't previously been in the foreground.
@@ -1323,19 +1349,12 @@ ipcMain.on('close-browser', (_event: IpcMainEvent): void => {
   app.quit();
 });
 
-// Overlay close button — show native confirm dialog then quit
+// Overlay close button — request renderer to show in-app confirmation modal (avoids window blur violation)
 ipcMain.on('overlay-request-close', (): void => {
-  const choice = showModalDialog(mainWindow, {
-    type: 'question',
-    title: 'Close Secure Browser',
-    message: 'Are you sure you want to close the Secure Browser?\n\nThis will end your current session.',
-    buttons: ['Cancel', 'Yes, Close'],
-    defaultId: 0,
-    cancelId: 0,
-  });
-
-  if (choice === 1) {
-    console.log('[SecureBrowser] User confirmed close via overlay button.');
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    console.log('[SecureBrowser] Forwarding close confirmation request to webContents in-app modal.');
+    mainWindow.webContents.send('show-close-confirmation');
+  } else {
     app.quit();
   }
 });

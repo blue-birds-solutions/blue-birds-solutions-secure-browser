@@ -167,6 +167,12 @@ interface SecureBrowserAPI {
   onWindowBlur: (callback: () => void) => Unsubscribe;
   onWindowFocus: (callback: () => void) => Unsubscribe;
 
+  /**
+   * Subscribe to in-app close confirmation requests triggered by the overlay close button.
+   * Prevents window blur and avoids triggering false proctoring violations.
+   */
+  onShowCloseConfirmation: (callback: () => void) => Unsubscribe;
+
   /** Notifies the shell that the student has entered/started the exam. */
   startExam: () => void;
 
@@ -263,6 +269,15 @@ const secureBrowserAPI: SecureBrowserAPI = {
     ipcRenderer.on('window-focus', subscription);
     return (): void => {
       ipcRenderer.removeListener('window-focus', subscription);
+    };
+  },
+
+  // Close confirmation request sent from overlay close button
+  onShowCloseConfirmation: (callback: () => void): Unsubscribe => {
+    const subscription = (): void => callback();
+    ipcRenderer.on('show-close-confirmation', subscription);
+    return (): void => {
+      ipcRenderer.removeListener('show-close-confirmation', subscription);
     };
   },
 
