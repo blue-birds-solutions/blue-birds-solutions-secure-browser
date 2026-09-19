@@ -118,6 +118,7 @@ let pendingDeepLinkUrl: string | null = null;
 let isRequestingPermission = false;
 /** Credentials injected from deep link — made available to preload synchronously */
 let activeAttemptId: string | null = null;
+let activeAssessmentId: string | null = null;
 let activeToken: string | null = null;
 
 // ─── Helpers: kiosk / fullscreen lockout management ──────────────────────────
@@ -176,13 +177,19 @@ function createWindow(): void {
     mainWindow.setContentProtection(true);
   }
 
+  // Inject official BluebirdsSecureApp signature into User-Agent for platform detection
+  const customUserAgent = `${mainWindow.webContents.getUserAgent()} BluebirdsSecureApp/${app.getVersion()} BluebirdsApp`;
+  mainWindow.webContents.setUserAgent(customUserAgent);
+  session.defaultSession.setUserAgent(customUserAgent);
+
   // Build the initial URL — if launched via deep link, go directly to system-check
   const origin: string =
     process.env.APP_URL ??
     (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
 
-  const initialUrl = activeAttemptId
-    ? `${origin}/system-check/${activeAttemptId}`
+  const targetId = activeAttemptId || activeAssessmentId;
+  const initialUrl = targetId
+    ? `${origin}/system-check/${targetId}`
     : origin;
 
   console.log(`[SecureBrowser] Loading initial URL: ${initialUrl}`);
@@ -1293,15 +1300,17 @@ function handleDeepLink(urlStr: string): void {
   try {
     const parsedUrl = new URL(urlStr);
     const attemptId = parsedUrl.searchParams.get('attemptId');
+    const assessmentId = parsedUrl.searchParams.get('assessmentId');
     const token = parsedUrl.searchParams.get('token');
 
-    if (attemptId && token) {
+    if ((attemptId || assessmentId) && token) {
       // Store credentials so preload can inject them synchronously before React boots
       activeAttemptId = attemptId;
+      activeAssessmentId = assessmentId;
       activeToken = token;
-      console.log(`[SecureBrowser] Deep link credentials stored for attempt: ${attemptId}`);
+      console.log(`[SecureBrowser] Deep link credentials stored: attempt=${attemptId}, assessment=${assessmentId}`);
     } else {
-      console.warn('[SecureBrowser] Deep link missing attemptId or token. Ignoring.');
+      console.warn('[SecureBrowser] Deep link missing attemptId/assessmentId or token. Ignoring.');
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1320,8 +1329,9 @@ function handleDeepLink(urlStr: string): void {
       process.env.APP_URL ??
       (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
 
-    if (activeAttemptId && activeToken) {
-      const systemCheckUrl = `${origin}/system-check/${activeAttemptId}`;
+    const targetId = activeAttemptId || activeAssessmentId;
+    if (targetId && activeToken) {
+      const systemCheckUrl = `${origin}/system-check/${targetId}`;
       console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
 
       // Navigate to origin first to ensure same-origin localStorage access

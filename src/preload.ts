@@ -252,3 +252,4 @@ const secureBrowserAPI: SecureBrowserAPI = {
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);
+contextBridge.exposeInMainWorld('__BLUEBIRDS_APP__', true);
