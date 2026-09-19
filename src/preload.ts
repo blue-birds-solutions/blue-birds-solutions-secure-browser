@@ -173,6 +173,11 @@ interface SecureBrowserAPI {
    */
   onShowCloseConfirmation: (callback: () => void) => Unsubscribe;
 
+  /**
+   * Subscribe to background auto-update status updates (checking, downloading, ETA, etc.).
+   */
+  onUpdateStatus: (callback: (status: any) => void) => Unsubscribe;
+
   /** Notifies the shell that the student has entered/started the exam. */
   startExam: () => void;
 
@@ -278,6 +283,15 @@ const secureBrowserAPI: SecureBrowserAPI = {
     ipcRenderer.on('show-close-confirmation', subscription);
     return (): void => {
       ipcRenderer.removeListener('show-close-confirmation', subscription);
+    };
+  },
+
+  // Auto-updater status updates sent from main process
+  onUpdateStatus: (callback: (status: any) => void): Unsubscribe => {
+    const subscription = (_event: IpcRendererEvent, status: any): void => callback(status);
+    ipcRenderer.on('auto-update-status', subscription);
+    return (): void => {
+      ipcRenderer.removeListener('auto-update-status', subscription);
     };
   },
 

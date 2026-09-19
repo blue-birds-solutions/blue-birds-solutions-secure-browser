@@ -143,6 +143,7 @@ let clipboardWiperInterval: ReturnType<typeof setInterval> | null = null;
 let wifiMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let isExamActive = false;
 let isUpdateDownloaded = false;
+let isUpdating = false;
 let wasOpenedViaDeepLink = false;
 let consecutiveOfflineCount = 0;
 let isInitialized = false;
@@ -267,8 +268,13 @@ function createWindow(): void {
         overlayWindow.setAlwaysOnTop(true, 'screen-saver');
         syncOverlayPosition();
       }
-      // Close splash screen
-      if (splashWindow) {
+      // Close splash screen only if an update is not actively downloading
+      if (isUpdating) {
+        mainWindow.hide();
+        if (overlayWindow && !overlayWindow.isDestroyed()) {
+          overlayWindow.hide();
+        }
+      } else if (splashWindow) {
         splashWindow.destroy();
         splashWindow = null;
       }
@@ -455,8 +461,8 @@ function createWindow(): void {
 
 function createSplashWindow(): void {
   splashWindow = new BrowserWindow({
-    width: 450,
-    height: 300,
+    width: 520,
+    height: 330,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -483,6 +489,34 @@ function createSplashWindow(): void {
   });
 
   console.log('[SecureBrowser] Splash window created.');
+}
+
+export interface UpdateStatusPayload {
+  status: 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+  version?: string;
+  percent?: number;
+  speed?: string;
+  bytesPerSecond?: number;
+  transferred?: number;
+  total?: number;
+  etaSeconds?: number | null;
+  etaString?: string;
+  error?: string;
+}
+
+function sendUpdateStatus(payload: UpdateStatusPayload): void {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    const jsonStr = JSON.stringify(payload);
+    splashWindow.webContents
+      .executeJavaScript(
+        `if (typeof window.onUpdateStatus === 'function') { window.onUpdateStatus(${jsonStr}); }`
+      )
+      .catch((): void => {});
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('auto-update-status', payload);
+  }
 }
 
 // ─── Overlay Window ─────────────────────────────────────────────────────────────
@@ -1682,13 +1716,139 @@ if (!gotTheLock) {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
 
-    autoUpdater.on('update-downloaded', (): void => {
+    autoUpdater.on('checking-for-update', (): void => {
+      console.log('[AutoUpdater] Checking for updates on remote repository...');
+      sendUpdateStatus({ status: 'checking' });
+    });
+
+    autoUpdater.on('update-available', (info): void => {
+      console.log(`[AutoUpdater] Update available: v${info.version}`);
+      isUpdating = true;
+      if (splashWindow && !splashWindow.isDestroyed()) {
+        splashWindow.show();
+        bringAppToFront();
+      }
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.hide();
+      }
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.hide();
+      }
+      sendUpdateStatus({
+        status: 'available',
+        version: info.version,
+      });
+    });
+
+    autoUpdater.on('download-progress', (progressObj): void => {
+      isUpdating = true;
+      const percent = Math.min(100, Math.max(0, progressObj.percent || 0));
+      const bytesPerSecond = progressObj.bytesPerSecond || 0;
+      const speed = bytesPerSecond > 0
+        ? (bytesPerSecond >= 1024 * 1024
+            ? `${(bytesPerSecond / (1024 * 1024)).toFixed(2)} MB/s`
+            : `${(bytesPerSecond / 1024).toFixed(1)} KB/s`)
+        : '0.00 MB/s';
+
+      const transferred = progressObj.transferred || 0;
+      const total = progressObj.total || 0;
+      const remainingBytes = Math.max(0, total - transferred);
+
+      let etaSeconds: number | null = null;
+      let etaString = 'Calculating...';
+
+      if (bytesPerSecond > 1024 && remainingBytes > 0) {
+        etaSeconds = Math.ceil(remainingBytes / bytesPerSecond);
+        if (etaSeconds < 60) {
+          etaString = `~${etaSeconds}s remaining`;
+        } else {
+          const mins = Math.floor(etaSeconds / 60);
+          const secs = etaSeconds % 60;
+          etaString = `~${mins}m ${secs}s remaining`;
+        }
+      } else if (remainingBytes === 0 && total > 0) {
+        etaString = 'Finalizing package...';
+      }
+
+      console.log(`[AutoUpdater] Progress: ${percent.toFixed(1)}% | ${speed} | ETA: ${etaString}`);
+
+      sendUpdateStatus({
+        status: 'downloading',
+        percent,
+        speed,
+        bytesPerSecond,
+        transferred,
+        total,
+        etaSeconds,
+        etaString,
+      });
+    });
+
+    autoUpdater.on('update-downloaded', (info): void => {
+      console.log(`[AutoUpdater] Update v${info.version} downloaded successfully.`);
       isUpdateDownloaded = true;
+      sendUpdateStatus({
+        status: 'downloaded',
+        version: info.version,
+        percent: 100,
+        etaString: 'Restarting in 2s...',
+      });
+
       if (!isExamActive) {
-        console.log('[SecureBrowser] Update downloaded and student is not in exam. Installing...');
-        autoUpdater.quitAndInstall();
+        console.log('[AutoUpdater] Installing update and restarting client...');
+        setTimeout((): void => {
+          autoUpdater.quitAndInstall(false, true);
+        }, 1800);
       } else {
-        console.log('[SecureBrowser] Update downloaded during an active exam session. Postponing installation.');
+        console.log('[AutoUpdater] Update downloaded during an active exam session. Postponing installation.');
+      }
+    });
+
+    autoUpdater.on('update-not-available', (info): void => {
+      console.log(`[AutoUpdater] Client is up to date (v${app.getVersion()}).`);
+      isUpdating = false;
+      sendUpdateStatus({
+        status: 'not-available',
+        version: app.getVersion(),
+      });
+      if (splashWindow && mainWindow && !mainWindow.isDestroyed()) {
+        setTimeout((): void => {
+          if (splashWindow && !isUpdating) {
+            splashWindow.destroy();
+            splashWindow = null;
+          }
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+          if (overlayWindow && !overlayWindow.isDestroyed()) {
+            overlayWindow.show();
+          }
+        }, 400);
+      }
+    });
+
+    autoUpdater.on('error', (err: Error): void => {
+      console.error('[AutoUpdater] Update check error:', err.message);
+      isUpdating = false;
+      sendUpdateStatus({
+        status: 'error',
+        error: err.message,
+      });
+      if (splashWindow && mainWindow && !mainWindow.isDestroyed()) {
+        setTimeout((): void => {
+          if (splashWindow && !isUpdating) {
+            splashWindow.destroy();
+            splashWindow = null;
+          }
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
+          if (overlayWindow && !overlayWindow.isDestroyed()) {
+            overlayWindow.show();
+          }
+        }, 400);
       }
     });
 
