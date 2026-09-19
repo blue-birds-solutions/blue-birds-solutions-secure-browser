@@ -1,6 +1,6 @@
 {
   "name": "bluebirds-secure-browser",
-  "version": "1.1.20",
+  "version": "1.1.21",
   "description": "Lockdown Browser Shell for Bluebirds Assessment Platform",
   "main": "dist/main.js",
   "scripts": {
@@ -49,9 +49,7 @@
     },
     "files": [
       "dist/**/*",
-      "src/overlay.html",
-      "src/splash.html",
-      "src/desktop_icon.png",
+      "src/**/*",
       "desktop_icon.png"
     ],
     "extraResources": [

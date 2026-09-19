@@ -186,6 +186,7 @@ let pendingDeepLinkUrl: string | null = null;
  * fullscreen must be suspended so those dialogs are reachable.
  */
 let isRequestingPermission = false;
+let isConfirmingExit = false;
 /** Credentials injected from deep link — made available to preload synchronously */
 let activeAttemptId: string | null = null;
 let activeAssessmentId: string | null = null;
@@ -375,6 +376,7 @@ function createWindow(): void {
   // IMPORTANT: Do NOT steal focus when the app is in "permission request" mode —
   // that is when the user needs to interact with a macOS dialog or System Settings.
   mainWindow.on('blur', (): void => {
+    if (isConfirmingExit) return;
     if (!IS_DEV && mainWindow && !isRequestingPermission) {
       if (process.platform === 'win32') {
         mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
@@ -533,8 +535,26 @@ function createProhibitedWindow(forbiddenApps: string[]): void {
     prohibitedWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
 
-  const modalPath = path.join(__dirname, '..', 'src', 'prohibited-modal.html');
-  prohibitedWindow.loadFile(modalPath, { hash: app.getVersion() });
+  const possiblePaths = [
+    path.join(__dirname, '..', 'src', 'prohibited-modal.html'),
+    path.join(__dirname, 'src', 'prohibited-modal.html'),
+    path.join(process.resourcesPath, 'app.asar', 'src', 'prohibited-modal.html'),
+  ];
+  let modalPath = possiblePaths[0];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+      modalPath = p;
+      break;
+    }
+  }
+
+  prohibitedWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    console.error('[SecureBrowser] prohibited-modal.html failed to load:', code, desc, 'path was:', modalPath);
+  });
+
+  prohibitedWindow.loadFile(modalPath, { hash: app.getVersion() }).catch((err) => {
+    console.error('[SecureBrowser] loadFile exception for prohibited-modal:', err);
+  });
 
   prohibitedWindow.webContents.once('did-finish-load', () => {
     if (!prohibitedWindow || prohibitedWindow.isDestroyed()) return;
@@ -1428,9 +1448,11 @@ function closeAllOtherGUIApps(): Promise<void> {
     } else if (process.platform === 'darwin') {
       // Fire all pkill calls in parallel — no blocking osascript calls
       const killTargets = [
-        'Google Chrome', 'Brave Browser', 'Microsoft Edge', 'Firefox', 'Safari',
+        'Google Chrome', 'Google Chrome Helper', 'Google Chrome Helper (Renderer)',
+        'Brave Browser', 'Brave Browser Helper', 'Brave Browser Helper (Renderer)',
+        'Microsoft Edge', 'Firefox', 'Safari',
         'Opera', 'Vivaldi', 'Arc', 'Slack', 'zoom.us', 'Discord', 'Microsoft Teams',
-        'Telegram', 'WhatsApp', 'Skype', 'TeamViewer', 'AnyDesk', 'obs',
+        'Telegram', 'WhatsApp', 'Skype', 'TeamViewer', 'AnyDesk', 'obs', 'chrome-devtools-mcp',
       ];
 
       let pending = killTargets.length;
@@ -1854,48 +1876,61 @@ ipcMain.on('get-boot-tokens', (event): void => {
   };
 });
 
+ipcMain.on('app-force-quit', (): void => {
+  console.log('[SecureBrowser] app-force-quit received from in-app dock modal.');
+  performCleanExit();
+});
+
 ipcMain.on('close-browser', (_event: IpcMainEvent): void => {
   console.log('[SecureBrowser] Closing application on renderer request...');
-  app.quit();
+  performCleanExit();
 });
 
 // Overlay close button — show native dialog box to cleanly confirm exit
 ipcMain.on('overlay-request-close', async (): Promise<void> => {
   console.log('[SecureBrowser] overlay-request-close received from native HUD.');
 
-  if (isExamActive && mainWindow && !mainWindow.isDestroyed()) {
-    const { response } = await dialog.showMessageBox(mainWindow, {
-      type: 'warning',
-      title: 'Exit Secure Browser',
-      message: 'Are you sure you want to exit the examination?',
-      detail: 'If you exit now, your assessment will remain in-progress and must be completed before the deadline. Do you wish to quit the application?',
-      buttons: ['Return to Exam', 'Exit App'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    });
+  isConfirmingExit = true;
+  try {
+    if (isExamActive && mainWindow && !mainWindow.isDestroyed()) {
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Exit Secure Browser',
+        message: 'Are you sure you want to exit the examination?',
+        detail: 'If you exit now, your assessment will remain in-progress and must be completed before the deadline. Do you wish to quit the application?',
+        buttons: ['Return to Exam', 'Exit App'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
 
-    if (response === 1) {
-      console.log('[SecureBrowser] User confirmed exit from native HUD during exam.');
-      performCleanExit();
+      if (response === 1) {
+        console.log('[SecureBrowser] User confirmed exit from native HUD during exam.');
+        performCleanExit();
+      }
+    } else {
+      const opts: Electron.MessageBoxOptions = {
+        type: 'question',
+        title: 'Exit Secure Browser',
+        message: 'Do you want to quit the Secure Browser application?',
+        buttons: ['Cancel', 'Quit App'],
+        defaultId: 1,
+        cancelId: 0,
+        noLink: true,
+      };
+      const { response } = mainWindow && !mainWindow.isDestroyed()
+        ? await dialog.showMessageBox(mainWindow, opts)
+        : await dialog.showMessageBox(opts);
+
+      if (response === 1) {
+        console.log('[SecureBrowser] User confirmed exit from native HUD.');
+        performCleanExit();
+      }
     }
-  } else {
-    const opts: Electron.MessageBoxOptions = {
-      type: 'question',
-      title: 'Exit Secure Browser',
-      message: 'Do you want to quit the Secure Browser application?',
-      buttons: ['Cancel', 'Quit App'],
-      defaultId: 1,
-      cancelId: 0,
-      noLink: true,
-    };
-    const { response } = mainWindow && !mainWindow.isDestroyed()
-      ? await dialog.showMessageBox(mainWindow, opts)
-      : await dialog.showMessageBox(opts);
-
-    if (response === 1) {
-      console.log('[SecureBrowser] User confirmed exit from native HUD.');
-      performCleanExit();
+  } finally {
+    isConfirmingExit = false;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.focus();
     }
   }
 });
@@ -2085,36 +2120,44 @@ function handleDeepLink(urlStr: string): void {
     return;
   }
 
-  // Already initialized — navigate the live window directly
+  // Already initialized — verify system is clean first, then navigate the live window
   if (mainWindow) {
-    const origin =
-      process.env.APP_URL ??
-      (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
-
-    const targetId = activeAttemptId || activeAssessmentId;
-    if (targetId) {
-      let systemCheckUrl = `${origin}/system-check/${targetId}`;
-      if (activeToken) {
-        systemCheckUrl += `?token=${encodeURIComponent(activeToken)}`;
+    (async () => {
+      const clean = await checkAndCleanSystem(mainWindow);
+      if (!clean) {
+        console.log('[SecureBrowser] Startup gate rejected deep link navigation because system was not clean.');
+        return;
       }
-      console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
 
-      if (activeToken) {
-        mainWindow.webContents
-          .executeJavaScript(
-            `try { localStorage.setItem('accessToken', '${activeToken}'); sessionStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
-          )
-          .catch(() => {});
+      const origin =
+        process.env.APP_URL ??
+        (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
+
+      const targetId = activeAttemptId || activeAssessmentId;
+      if (targetId) {
+        let systemCheckUrl = `${origin}/system-check/${targetId}`;
+        if (activeToken) {
+          systemCheckUrl += `?token=${encodeURIComponent(activeToken)}`;
+        }
+        console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
+
+        if (activeToken) {
+          mainWindow.webContents
+            .executeJavaScript(
+              `try { localStorage.setItem('accessToken', '${activeToken}'); sessionStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
+            )
+            .catch(() => {});
+        }
+        mainWindow.loadURL(systemCheckUrl);
       }
-      mainWindow.loadURL(systemCheckUrl);
-    }
 
-    // Bring to foreground
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.setAlwaysOnTop(true, 'screen-saver');
-    mainWindow.focus();
-    bringAppToFront();
+      // Bring to foreground
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.setAlwaysOnTop(true, 'screen-saver');
+      mainWindow.focus();
+      bringAppToFront();
+    })();
   }
 }
 

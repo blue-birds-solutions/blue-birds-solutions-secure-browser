@@ -360,17 +360,17 @@ const secureBrowserAPI: SecureBrowserAPI = {
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke('get-app-version'),
 
-  appVersion: '1.1.20',
+  appVersion: '1.1.21',
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);
 contextBridge.exposeInMainWorld('__BLUEBIRDS_APP__', true);
 
-// ─── SEB-Style Persistent Bottom Dock (Preload DOM Injection) ────────────────
-// Injects a tamper-proof, high-contrast, SEB-style bottom HUD into the DOM via
-// Shadow DOM. Because macOS kiosk mode isolates child BrowserWindow instances to
-// desktop spaces behind fullscreen presentation spaces, injecting directly into
-// the host window DOM guarantees 100% visibility across macOS, Windows, and Linux.
+// ─── SEB-Style Persistent Top HUD (Preload DOM Injection) ─────────────────────
+// Injects a tamper-proof, high-contrast, SEB-style HUD into the DOM via Shadow DOM.
+// Positioned at the top-center of the navbar to prevent blocking any navigation
+// controls (such as Next / Prev buttons in coding exams) while guaranteeing
+// 100% visibility across macOS, Windows, and Linux.
 
 function initializeSebBottomDock(): void {
   const ROOT_ID = '__bb_seb_dock_root__';
@@ -378,7 +378,7 @@ function initializeSebBottomDock(): void {
   let currentLatency: number | null = null;
   let currentBatteryPercent = 100;
   let currentIsCharging = false;
-  let currentAppVersion = 'v1.1.20';
+  let currentAppVersion = 'v1.1.21';
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const createDockDOM = (shadow: any) => {
@@ -387,8 +387,9 @@ function initializeSebBottomDock(): void {
         :host {
           all: initial;
           position: fixed;
-          bottom: 12px;
-          right: 16px;
+          top: 8px;
+          left: 50%;
+          transform: translateX(-50%);
           z-index: 2147483647;
           pointer-events: none;
           font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
@@ -405,7 +406,7 @@ function initializeSebBottomDock(): void {
           -webkit-backdrop-filter: blur(20px);
           border: 1px solid rgba(255, 255, 255, 0.12);
           border-radius: 9999px;
-          padding: 6px 14px 6px 12px;
+          padding: 5px 14px 5px 12px;
           box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05);
           color: #f1f5f9;
           font-size: 11.5px;
@@ -541,6 +542,118 @@ function initializeSebBottomDock(): void {
           width: 12px;
           height: 12px;
         }
+
+        /* In-App Confirmation Modal (Zero Focus-Loss, Zero Tab-Switch Violations) */
+        .modal-overlay {
+          pointer-events: auto;
+          position: fixed;
+          top: -8px;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 100vw;
+          height: 100vh;
+          background: rgba(15, 23, 42, 0.7);
+          backdrop-filter: blur(8px);
+          -webkit-backdrop-filter: blur(8px);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 2147483647;
+        }
+
+        .modal-overlay.hidden {
+          display: none;
+        }
+
+        .modal-dialog {
+          background: #1e293b;
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          border-radius: 16px;
+          padding: 24px 28px;
+          max-width: 420px;
+          width: 90%;
+          text-align: center;
+          box-shadow: 0 24px 50px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+          animation: modalIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes modalIn {
+          from { transform: scale(0.95); opacity: 0; }
+          to { transform: scale(1); opacity: 1; }
+        }
+
+        .modal-icon-badge {
+          width: 48px;
+          height: 48px;
+          margin: 0 auto 14px;
+          background: rgba(245, 158, 11, 0.15);
+          border: 1px solid rgba(245, 158, 11, 0.3);
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .modal-icon-badge svg {
+          width: 24px;
+          height: 24px;
+          color: #f59e0b;
+        }
+
+        .modal-heading {
+          font-size: 16px;
+          font-weight: 700;
+          color: #f8fafc;
+          margin-bottom: 8px;
+          letter-spacing: -0.01em;
+        }
+
+        .modal-description {
+          font-size: 12.5px;
+          line-height: 1.5;
+          color: #94a3b8;
+          margin-bottom: 20px;
+        }
+
+        .modal-btn-row {
+          display: flex;
+          gap: 12px;
+        }
+
+        .modal-action-btn {
+          all: unset;
+          cursor: pointer;
+          flex: 1;
+          height: 38px;
+          border-radius: 10px;
+          font-size: 12.5px;
+          font-weight: 600;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: all 0.15s ease;
+          box-sizing: border-box;
+        }
+
+        .modal-btn-stay {
+          background: rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          color: #f1f5f9;
+        }
+
+        .modal-btn-stay:hover {
+          background: rgba(255, 255, 255, 0.15);
+        }
+
+        .modal-btn-quit {
+          background: #dc2626;
+          border: 1px solid #ef4444;
+          color: #ffffff;
+        }
+
+        .modal-btn-quit:hover {
+          background: #b91c1c;
+        }
       </style>
 
       <div class="dock">
@@ -548,7 +661,7 @@ function initializeSebBottomDock(): void {
         <div class="brand" title="Bluebirds Secure Browser">
           <span class="brand-badge">BB</span>
           <span class="brand-title">Secure</span>
-          <span class="version-tag" id="dock-version">v1.1.20</span>
+          <span class="version-tag" id="dock-version">v1.1.21</span>
         </div>
 
         <div class="divider"></div>
@@ -603,6 +716,27 @@ function initializeSebBottomDock(): void {
           <span>Exit App</span>
         </button>
       </div>
+
+      <!-- In-App Confirmation Modal (Lives in Shadow DOM so window NEVER loses focus) -->
+      <div class="modal-overlay hidden" id="dock-modal-overlay">
+        <div class="modal-dialog">
+          <div class="modal-icon-badge">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/>
+              <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+          </div>
+          <div class="modal-heading">Are you sure you want to exit the examination?</div>
+          <div class="modal-description">
+            If you exit now, your assessment will remain in-progress and must be completed before the deadline. Do you wish to quit the application?
+          </div>
+          <div class="modal-btn-row">
+            <button class="modal-action-btn modal-btn-stay" id="dock-modal-cancel">Return to Exam</button>
+            <button class="modal-action-btn modal-btn-quit" id="dock-modal-confirm">Exit App</button>
+          </div>
+        </div>
+      </div>
     `;
 
     // Clock updater
@@ -620,12 +754,30 @@ function initializeSebBottomDock(): void {
     updateClock();
     setInterval(updateClock, 1000);
 
-    // Exit button handler
+    // In-App Exit Modal Handler: Prevents OS window blur & false tab switch violations
     const exitBtn = shadow.getElementById('dock-exit-btn');
-    if (exitBtn) {
+    const modal = shadow.getElementById('dock-modal-overlay');
+    const cancelBtn = shadow.getElementById('dock-modal-cancel');
+    const confirmBtn = shadow.getElementById('dock-modal-confirm');
+
+    if (exitBtn && modal) {
       exitBtn.addEventListener('click', (e: any) => {
         e.stopPropagation();
-        ipcRenderer.send('overlay-request-close');
+        modal.classList.remove('hidden');
+      });
+    }
+
+    if (cancelBtn && modal) {
+      cancelBtn.addEventListener('click', (e: any) => {
+        e.stopPropagation();
+        modal.classList.add('hidden');
+      });
+    }
+
+    if (confirmBtn) {
+      confirmBtn.addEventListener('click', (e: any) => {
+        e.stopPropagation();
+        ipcRenderer.send('app-force-quit');
       });
     }
   };
