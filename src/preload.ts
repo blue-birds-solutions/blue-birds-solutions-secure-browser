@@ -222,6 +222,9 @@ interface SecureBrowserAPI {
    * app and immediately continue their exam.
    */
   killProcessByName: (processName: string) => Promise<boolean>;
+
+  /** Re-enforces native OS fullscreen and kiosk mode. */
+  restoreFullscreen: () => void;
 }
 
 // ─── Context Bridge Exposure ─────────────────────────────────────────────────
@@ -324,6 +327,11 @@ const secureBrowserAPI: SecureBrowserAPI = {
   // Force-close a single process by name (used from mid-exam violation overlay)
   killProcessByName: (processName: string): Promise<boolean> =>
     ipcRenderer.invoke('kill-process-by-name', processName),
+
+  // Explicitly re-assert native OS fullscreen and kiosk constraints
+  restoreFullscreen: (): void => {
+    ipcRenderer.send('restore-fullscreen');
+  },
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);

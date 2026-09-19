@@ -50,6 +50,7 @@ const BLACKLIST: readonly string[] = [
   // Communication & Meeting Tools
   'discord',
   'zoom',
+  'zoom.us',
   'skype',
   'teams',
   'slack',
@@ -80,6 +81,29 @@ const BLACKLIST: readonly string[] = [
   'tightvnc',
   'ultravnc',
   'realvnc',
+
+  // Web Browsers (Must be closed to prevent background meetings and unauthorized browsing)
+  'chrome',
+  'google chrome',
+  'google chrome helper',
+  'brave',
+  'brave browser',
+  'msedge',
+  'microsoft edge',
+  'firefox',
+  'opera',
+  'safari',
+  'vivaldi',
+  'arc',
+
+  // Non-Essential Background Apps & Terminals
+  'code',
+  'cursor',
+  'terminal',
+  'iterm',
+  'iterm2',
+  'notes',
+  'textedit',
 
   // Anti-Reverse Engineering, Debuggers, Decompilers & Macro Cheat Engines
   'cheatengine',
@@ -1039,43 +1063,49 @@ function closeAllOtherGUIApps(): Promise<void> {
       });
     } else if (process.platform === 'darwin') {
       const appleScript = `osascript -e 'tell application "System Events" to get name of every process whose background only is false'`;
-      
+
       exec(appleScript, (err, stdout) => {
-        if (err || !stdout) {
-          resolve();
-          return;
-        }
-        
-        const apps = stdout.split(',').map(a => a.trim()).filter(Boolean);
+        const apps = stdout && !err ? stdout.split(',').map((a) => a.trim()).filter(Boolean) : [];
         const whitelist = [
           'Finder',
           'BluebirdsSecureBrowser',
           'bluebirds-secure-browser',
           'Electron',
         ];
-        
-        const toClose = apps.filter(name => !whitelist.some(w => name.toLowerCase() === w.toLowerCase() || name.toLowerCase().includes('bluebirds')));
-        
+
+        const toClose = apps.filter(
+          (name) =>
+            !whitelist.some(
+              (w) => name.toLowerCase() === w.toLowerCase() || name.toLowerCase().includes('bluebirds')
+            )
+        );
+
+        // In addition, ALWAYS enforce POSIX-level killing of known third-party browsers and communication tools:
+        const targetKillList = [
+          'Google Chrome', 'chrome', 'Brave Browser', 'brave', 'Microsoft Edge', 'msedge',
+          'Firefox', 'firefox', 'Safari', 'Opera', 'Vivaldi', 'Arc',
+          'Slack', 'slack', 'zoom.us', 'zoom', 'Discord', 'discord', 'Microsoft Teams', 'teams',
+          'Telegram', 'WhatsApp', 'Skype'
+        ];
+
+        targetKillList.forEach((proc) => {
+          exec(`pkill -9 -i -f "${proc}"`, () => {});
+        });
+
         if (toClose.length === 0) {
           resolve();
           return;
         }
-        
+
         console.log('[SecureBrowser] Auto-closing macOS GUI apps:', toClose);
-        
+
         let closedCount = 0;
         toClose.forEach((appName) => {
-          exec(`osascript -e 'tell application "${appName}" to quit'`, (quitErr) => {
-            if (quitErr) {
-              console.warn(`[SecureBrowser] Failed clean quit for macOS app ${appName}, trying pkill:`, quitErr.message);
-              exec(`pkill -9 -f "${appName}"`, () => {
-                closedCount++;
-                if (closedCount === toClose.length) resolve();
-              });
-            } else {
+          exec(`osascript -e 'tell application "${appName}" to quit'`, () => {
+            exec(`pkill -9 -i -f "${appName}"`, () => {
               closedCount++;
-              if (closedCount === toClose.length) resolve();
-            }
+              if (closedCount >= toClose.length) resolve();
+            });
           });
         });
       });
@@ -1528,16 +1558,21 @@ ipcMain.on('exam-started', (): void => {
 });
 
 ipcMain.on('exam-finished', (): void => {
-  console.log('[SecureBrowser] Exam finished. Deactivating security hooks; auto-updates enabled.');
+  console.log('[SecureBrowser] Exam finished. Deactivating aggressive security hooks while keeping fullscreen shell active.');
   isExamActive = false;
   unregisterGlobalShortcuts();
   stopProcessMonitor();
   stopClipboardWiper();
-  suspendKioskLockout();
+  // DO NOT call suspendKioskLockout() here — the browser must strictly maintain fullscreen kiosk on macOS.
   if (isUpdateDownloaded) {
     console.log('[SecureBrowser] Installing postponed update after exam finished...');
     autoUpdater.quitAndInstall();
   }
+});
+
+ipcMain.on('restore-fullscreen', (): void => {
+  console.log('[SecureBrowser] Explicit restore-fullscreen IPC requested.');
+  restoreKioskLockout();
 });
 
 // ─── Deep Link & Single Instance Handler ──────────────────────────────────────
