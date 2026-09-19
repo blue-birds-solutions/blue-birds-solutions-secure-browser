@@ -187,6 +187,30 @@ interface SecureBrowserAPI {
    * Kiosk mode is automatically suspended on macOS so the settings window can appear.
    */
   openPermissionSettings: (permType: 'screen' | 'camera' | 'microphone') => Promise<void>;
+
+  /**
+   * Audits currently running processes and returns forbidden applications
+   * and VM indicator results. Intended for the pre-flight system-check page.
+   */
+  checkProcesses: () => Promise<{
+    clean: boolean;
+    forbiddenApps: string[];
+    vmDetected: boolean;
+  }>;
+
+  /**
+   * Force-terminates all detected forbidden processes (full process-tree kill
+   * via `/T` on Windows). Returns whether the environment is now clean and any
+   * remaining processes that could not be terminated.
+   */
+  killForbiddenProcesses: () => Promise<{ success: boolean; remaining: string[] }>;
+
+  /**
+   * Force-terminates a single process by its executable name.
+   * Used from the mid-exam violation overlay so candidates can close a rogue
+   * app and immediately continue their exam.
+   */
+  killProcessByName: (processName: string) => Promise<boolean>;
 }
 
 // ─── Context Bridge Exposure ─────────────────────────────────────────────────
@@ -259,6 +283,18 @@ const secureBrowserAPI: SecureBrowserAPI = {
   // Ask the main process to open the OS-specific permission settings panel
   openPermissionSettings: (permType: 'screen' | 'camera' | 'microphone'): Promise<void> =>
     ipcRenderer.invoke('open-permission-settings', permType),
+
+  // Audit running processes for forbidden apps / VM indicators
+  checkProcesses: (): Promise<{ clean: boolean; forbiddenApps: string[]; vmDetected: boolean }> =>
+    ipcRenderer.invoke('check-processes'),
+
+  // Force-close all detected forbidden processes (tree-kill on Windows)
+  killForbiddenProcesses: (): Promise<{ success: boolean; remaining: string[] }> =>
+    ipcRenderer.invoke('kill-forbidden-processes'),
+
+  // Force-close a single process by name (used from mid-exam violation overlay)
+  killProcessByName: (processName: string): Promise<boolean> =>
+    ipcRenderer.invoke('kill-process-by-name', processName),
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);

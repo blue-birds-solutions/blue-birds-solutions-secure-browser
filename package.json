@@ -1,6 +1,6 @@
 {
   "name": "bluebirds-secure-browser",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "description": "Lockdown Browser Shell for Bluebirds Assessment Platform",
   "main": "dist/main.js",
   "scripts": {
@@ -9,6 +9,10 @@
     "start:dev": "npm run build && electron . --dev",
     "watch": "tsc --watch",
     "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win:x64": "npm run build && electron-builder --win --x64",
+    "dist:win:ia32": "npm run build && electron-builder --win --ia32 \"-c.win.target=nsis\" -c.win.artifactName=\"BluebirdsSecureBrowser-Setup-x86.exe\"",
+    "dist:all": "npm run dist:mac && npm run dist:win:x64 && npm run dist:win:ia32",
     "upload": "node upload.js",
     "publish:r2": "npm run dist && npm run upload",
     "sign:win": "powershell -ExecutionPolicy Bypass -File scripts/sign.ps1"

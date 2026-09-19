@@ -126,9 +126,20 @@ let activeToken: string | null = null;
 /**
  * Temporarily lifts all kiosk/always-on-top constraints so that macOS system
  * dialogs and System Settings can appear above the window.
+ *
+ * NOTE: On Windows, Chromium handles camera/microphone access internally
+ * via the browser-level permission bar — there is NO native OS modal that
+ * needs to sit above the window. Therefore, on Windows we must NEVER drop
+ * fullscreen or kiosk or the window collapses to its fallback size (1280x800)
+ * for the full restore-delay duration (was 20 s), ruining the user experience.
  */
 function suspendKioskLockout(): void {
   if (IS_DEV || !mainWindow || mainWindow.isDestroyed()) return;
+  // Windows: never exit fullscreen — no OS-level dialog needs to appear.
+  if (process.platform === 'win32') {
+    console.log('[SecureBrowser] Skipping kiosk suspend on Windows (not required).');
+    return;
+  }
   console.log('[SecureBrowser] Suspending kiosk lockout for permission dialog.');
   mainWindow.setKiosk(false);
   mainWindow.setFullScreen(false);
@@ -735,16 +746,22 @@ function getRunningViolations(processes: string[]): { forbiddenApps: string[]; v
   };
 }
 
-/** Cross-platform command executor to force close running processes. */
+/** Cross-platform command executor to force close running processes.
+ * On Windows, /T kills the entire process tree (parent + all children) to
+ * ensure packaged apps like WhatsApp (which spawn whatsapp.root.exe as a
+ * child process) are fully terminated.
+ */
 function killProcess(name: string, isWindows: boolean): Promise<void> {
   return new Promise((resolve) => {
-    const cmd = isWindows 
-      ? `taskkill /F /IM "${name}"`
+    // /T = terminate process and all of its children (process tree kill)
+    const cmd = isWindows
+      ? `taskkill /F /T /IM "${name}"`
       : `pkill -9 -f -i "${name}"`;
-    
-    console.log(`[SecureBrowser] Attempting to close forbidden process: ${name} (cmd: ${cmd})`);
+
+    console.log(`[SecureBrowser] Force-closing process tree: ${name} (cmd: ${cmd})`);
     exec(cmd, (err) => {
       if (err) {
+        // Error code 128 means process not found — acceptable if already closed
         console.warn(`[SecureBrowser] Failed to force close process ${name}:`, err.message);
       }
       resolve();
@@ -1029,18 +1046,26 @@ function installPermissionHandler(): void {
       console.log(`[SecureBrowser] Permission requested: ${permission} | isMedia: ${isMediaPermission}`);
 
       if (isMediaPermission && mainWindow && !mainWindow.isDestroyed()) {
-        // Suspend kiosk so the macOS system dialog can appear above the window
-        pendingPermissions += 1;
-        suspendKioskLockout();
-        console.log(`[SecureBrowser] Kiosk suspended for permission dialog: ${permission}`);
+        // On Windows, Chromium handles media permissions internally with no OS dialog.
+        // We must NOT suspend fullscreen/kiosk on Windows — it collapses the window.
+        // On macOS, we suspend so the TCC system dialog can appear above the window.
+        const isWin = process.platform === 'win32';
+        if (!isWin) {
+          pendingPermissions += 1;
+          suspendKioskLockout();
+          console.log(`[SecureBrowser] Kiosk suspended for permission dialog (macOS): ${permission}`);
+        } else {
+          console.log(`[SecureBrowser] Permission granted without kiosk suspend (Windows): ${permission}`);
+        }
 
-        // Grant the permission — Electron/Chromium will then trigger the
-        // macOS system permission dialog independently of the window level
+        // Grant the permission immediately
         callback(true);
 
-        // Restore kiosk lockout after a delay sufficient for the OS dialog
-        // to be shown and acknowledged (20 s gives user time to see the dialog)
-        restoreAfterPermissionDelayed(20_000);
+        // macOS only: restore kiosk after OS dialog duration.
+        // 5 s is sufficient — macOS TCC prompt appears almost instantly.
+        if (!isWin) {
+          restoreAfterPermissionDelayed(5_000);
+        }
       } else if (permission === 'notifications') {
         console.log(`[SecureBrowser] Blocking permission request: ${permission}`);
         callback(false);
@@ -1112,6 +1137,76 @@ ipcMain.handle('get-system-status', (): SystemStatus => {
     multipleMonitors: displays.length > 1,
     os: process.platform,
   };
+});
+
+// ─── Process Management IPC Handlers ────────────────────────────────────────
+
+/** IPC: check-processes
+ * Queries running system processes and returns forbidden/VM violations.
+ * Called by the pre-flight system-check page before entry.
+ */
+ipcMain.handle('check-processes', async (): Promise<{
+  clean: boolean;
+  forbiddenApps: string[];
+  vmDetected: boolean;
+}> => {
+  const isWindows = process.platform === 'win32';
+  try {
+    const processes = await getSystemProcesses(isWindows);
+    const { forbiddenApps, vmDetected } = getRunningViolations(processes);
+    return { clean: forbiddenApps.length === 0 && !vmDetected, forbiddenApps, vmDetected };
+  } catch (err) {
+    console.error('[SecureBrowser] check-processes failed:', err);
+    return { clean: true, forbiddenApps: [], vmDetected: false };
+  }
+});
+
+/** IPC: kill-forbidden-processes
+ * Force-closes all detected forbidden applications and returns updated status.
+ * Called by the pre-flight UI when the user clicks "Auto-Close All Apps".
+ */
+ipcMain.handle('kill-forbidden-processes', async (): Promise<{
+  success: boolean;
+  remaining: string[];
+}> => {
+  const isWindows = process.platform === 'win32';
+  try {
+    const processes = await getSystemProcesses(isWindows);
+    const { forbiddenApps } = getRunningViolations(processes);
+
+    // Kill all forbidden apps
+    for (const proc of forbiddenApps) {
+      await killProcess(proc, isWindows);
+    }
+
+    // Wait for processes to terminate
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    // Re-check
+    const afterProcesses = await getSystemProcesses(isWindows);
+    const { forbiddenApps: remaining } = getRunningViolations(afterProcesses);
+    return { success: remaining.length === 0, remaining };
+  } catch (err) {
+    console.error('[SecureBrowser] kill-forbidden-processes failed:', err);
+    return { success: false, remaining: [] };
+  }
+});
+
+/** IPC: kill-process-by-name
+ * Force-closes a single named process. Used from the mid-exam violation modal
+ * so candidates can terminate a rogue app and immediately resume their exam.
+ */
+ipcMain.handle('kill-process-by-name', async (_event, processName: string): Promise<boolean> => {
+  if (!processName || typeof processName !== 'string') return false;
+  const isWindows = process.platform === 'win32';
+  try {
+    await killProcess(processName, isWindows);
+    console.log(`[SecureBrowser] Successfully killed process: ${processName}`);
+    return true;
+  } catch (err) {
+    console.error(`[SecureBrowser] kill-process-by-name failed for ${processName}:`, err);
+    return false;
+  }
 });
 
 /**
