@@ -128,6 +128,7 @@ interface SystemStatus {
   antiScreenshot: boolean;
   multipleMonitors: boolean;
   os: string;
+  version?: string;
 }
 
 /** Unsubscribe function returned by all `on*` listeners. */
@@ -229,8 +230,14 @@ interface SecureBrowserAPI {
    */
   killProcessByName: (processName: string) => Promise<boolean>;
 
-  /** Re-enforces native OS fullscreen and kiosk mode. */
+  /** Re-enforces native OS fullscreen and kiosk constraints. */
   restoreFullscreen: () => void;
+
+  /** Returns application version string. */
+  getAppVersion: () => Promise<string>;
+
+  /** Application version string synchronously available. */
+  appVersion: string;
 }
 
 // ─── Context Bridge Exposure ─────────────────────────────────────────────────
@@ -348,7 +355,396 @@ const secureBrowserAPI: SecureBrowserAPI = {
   restoreFullscreen: (): void => {
     ipcRenderer.send('restore-fullscreen');
   },
+
+  // Returns app version
+  getAppVersion: (): Promise<string> =>
+    ipcRenderer.invoke('get-app-version'),
+
+  appVersion: '1.1.20',
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);
 contextBridge.exposeInMainWorld('__BLUEBIRDS_APP__', true);
+
+// ─── SEB-Style Persistent Bottom Dock (Preload DOM Injection) ────────────────
+// Injects a tamper-proof, high-contrast, SEB-style bottom HUD into the DOM via
+// Shadow DOM. Because macOS kiosk mode isolates child BrowserWindow instances to
+// desktop spaces behind fullscreen presentation spaces, injecting directly into
+// the host window DOM guarantees 100% visibility across macOS, Windows, and Linux.
+
+function initializeSebBottomDock(): void {
+  const ROOT_ID = '__bb_seb_dock_root__';
+
+  let currentLatency: number | null = null;
+  let currentBatteryPercent = 100;
+  let currentIsCharging = false;
+  let currentAppVersion = 'v1.1.20';
+
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const createDockDOM = (shadow: any) => {
+    shadow.innerHTML = `
+      <style>
+        :host {
+          all: initial;
+          position: fixed;
+          bottom: 12px;
+          right: 16px;
+          z-index: 2147483647;
+          pointer-events: none;
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+          -webkit-font-smoothing: antialiased;
+        }
+
+        .dock {
+          pointer-events: auto;
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          background: rgba(10, 15, 29, 0.88);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 9999px;
+          padding: 6px 14px 6px 12px;
+          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05);
+          color: #f1f5f9;
+          font-size: 11.5px;
+          user-select: none;
+          -webkit-user-select: none;
+          transition: all 0.2s ease;
+        }
+
+        .dock:hover {
+          background: rgba(15, 23, 42, 0.94);
+          border-color: rgba(255, 255, 255, 0.2);
+          box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+        }
+
+        .brand {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .brand-badge {
+          background: #2563eb;
+          color: #ffffff;
+          font-weight: 800;
+          font-size: 9.5px;
+          padding: 1.5px 5px;
+          border-radius: 4px;
+          letter-spacing: 0.04em;
+        }
+
+        .brand-title {
+          font-weight: 600;
+          color: #e2e8f0;
+          font-size: 11px;
+          letter-spacing: -0.01em;
+        }
+
+        .version-tag {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 9.5px;
+          color: #94a3b8;
+          background: rgba(255, 255, 255, 0.06);
+          padding: 1px 5px;
+          border-radius: 4px;
+          border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .divider {
+          width: 1px;
+          height: 14px;
+          background: rgba(255, 255, 255, 0.12);
+        }
+
+        .stat-item {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          font-weight: 500;
+        }
+
+        .icon {
+          width: 14px;
+          height: 14px;
+          flex-shrink: 0;
+        }
+
+        .mono {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 11px;
+          letter-spacing: 0.02em;
+        }
+
+        /* Wifi colors */
+        .wifi-green { color: #34d399; }
+        .wifi-amber { color: #fbbf24; }
+        .wifi-red   { color: #f87171; }
+
+        /* Battery fill */
+        .battery-container {
+          position: relative;
+          display: flex;
+          align-items: center;
+        }
+
+        .battery-svg {
+          width: 20px;
+          height: 12px;
+        }
+
+        .battery-bolt {
+          position: absolute;
+          left: 50%;
+          top: 50%;
+          transform: translate(-50%, -50%);
+          width: 9px;
+          height: 9px;
+          color: #fbbf24;
+          display: none;
+        }
+
+        .battery-bolt.active {
+          display: block;
+        }
+
+        /* Exit Button */
+        .exit-btn {
+          all: unset;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          background: rgba(239, 68, 68, 0.15);
+          border: 1px solid rgba(239, 68, 68, 0.35);
+          color: #fca5a5;
+          padding: 3px 8px;
+          border-radius: 9999px;
+          font-size: 10.5px;
+          font-weight: 600;
+          transition: all 0.15s ease;
+        }
+
+        .exit-btn:hover {
+          background: rgba(239, 68, 68, 0.3);
+          border-color: rgba(239, 68, 68, 0.6);
+          color: #ffffff;
+        }
+
+        .exit-btn:active {
+          transform: scale(0.96);
+        }
+
+        .exit-btn svg {
+          width: 12px;
+          height: 12px;
+        }
+      </style>
+
+      <div class="dock">
+        <!-- Brand / Version -->
+        <div class="brand" title="Bluebirds Secure Browser">
+          <span class="brand-badge">BB</span>
+          <span class="brand-title">Secure</span>
+          <span class="version-tag" id="dock-version">v1.1.20</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Latency -->
+        <div class="stat-item" id="dock-wifi-stat" title="Network Connection & Latency">
+          <svg class="icon wifi-green" id="dock-wifi-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+            <line x1="12" y1="20" x2="12.01" y2="20"/>
+          </svg>
+          <span class="mono wifi-green" id="dock-latency-val">-- ms</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Battery -->
+        <div class="stat-item" id="dock-battery-stat" title="Battery Level">
+          <div class="battery-container">
+            <svg class="battery-svg" viewBox="0 0 26 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="0.5" y="0.5" width="22" height="13" rx="2.5" stroke="currentColor" stroke-opacity="0.5"/>
+              <path d="M24 5V9" stroke="currentColor" stroke-opacity="0.5" stroke-linecap="round"/>
+              <rect id="dock-battery-bar" x="2" y="2" width="19" height="10" rx="1.5" fill="#34d399"/>
+            </svg>
+            <svg class="battery-bolt" id="dock-battery-bolt" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+          </div>
+          <span class="mono" id="dock-battery-val">100%</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- System Clock -->
+        <div class="stat-item" title="Local System Clock">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+          <span class="mono" id="dock-clock-val" style="color:#cbd5e1;">--:--:--</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Exit Button -->
+        <button class="exit-btn" id="dock-exit-btn" title="Exit Bluebirds Secure Browser">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+            <line x1="12" y1="2" x2="12" y2="12"/>
+          </svg>
+          <span>Exit App</span>
+        </button>
+      </div>
+    `;
+
+    // Clock updater
+    const clockEl = shadow.getElementById('dock-clock-val');
+    const updateClock = () => {
+      if (clockEl) {
+        clockEl.textContent = new Date().toLocaleTimeString([], {
+          hour12: false,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+      }
+    };
+    updateClock();
+    setInterval(updateClock, 1000);
+
+    // Exit button handler
+    const exitBtn = shadow.getElementById('dock-exit-btn');
+    if (exitBtn) {
+      exitBtn.addEventListener('click', (e: any) => {
+        e.stopPropagation();
+        ipcRenderer.send('overlay-request-close');
+      });
+    }
+  };
+
+  const updateDockUI = () => {
+    const _doc: any = (globalThis as any).document;
+    if (!_doc) return;
+    const root = _doc.getElementById(ROOT_ID);
+    if (!root || !root.shadowRoot) return;
+    const shadow = root.shadowRoot;
+
+    // Latency
+    const wifiIcon = shadow.getElementById('dock-wifi-icon');
+    const latencyVal = shadow.getElementById('dock-latency-val');
+    if (wifiIcon && latencyVal) {
+      const ms = currentLatency;
+      if (ms === null) {
+        latencyVal.textContent = 'Offline';
+        wifiIcon.className.baseVal = 'icon wifi-red';
+        latencyVal.className = 'mono wifi-red';
+      } else {
+        latencyVal.textContent = `${ms} ms`;
+        const tier = ms < 150 ? 'wifi-green' : ms < 450 ? 'wifi-amber' : 'wifi-red';
+        wifiIcon.className.baseVal = `icon ${tier}`;
+        latencyVal.className = `mono ${tier}`;
+      }
+    }
+
+    // Battery
+    const batteryVal = shadow.getElementById('dock-battery-val');
+    const batteryBar = shadow.getElementById('dock-battery-bar');
+    const batteryBolt = shadow.getElementById('dock-battery-bolt');
+    if (batteryVal && batteryBar && batteryBolt) {
+      const pct = Math.min(100, Math.max(0, currentBatteryPercent));
+      batteryVal.textContent = `${pct}%`;
+
+      // Fill width max 19px
+      const fillWidth = Math.round((pct / 100) * 19);
+      batteryBar.setAttribute('width', String(Math.max(1, fillWidth)));
+
+      // Color
+      const fillColor = pct > 20 ? '#34d399' : '#f87171';
+      batteryBar.setAttribute('fill', fillColor);
+
+      if (currentIsCharging) {
+        batteryBolt.classList.add('active');
+      } else {
+        batteryBolt.classList.remove('active');
+      }
+    }
+
+    // Version
+    const versionEl = shadow.getElementById('dock-version');
+    if (versionEl && currentAppVersion) {
+      versionEl.textContent = currentAppVersion.startsWith('v') ? currentAppVersion : `v${currentAppVersion}`;
+    }
+  };
+
+  const inject = () => {
+    const _doc: any = (globalThis as any).document;
+    if (!_doc) return;
+    if (_doc.getElementById(ROOT_ID)) return;
+
+    const host = _doc.body || _doc.documentElement;
+    if (!host) {
+      setTimeout(inject, 10);
+      return;
+    }
+
+    const container = _doc.createElement('div');
+    container.id = ROOT_ID;
+    const shadow = container.attachShadow({ mode: 'open' });
+    createDockDOM(shadow);
+    host.appendChild(container);
+    updateDockUI();
+    console.log('[SecureBrowser Preload] SEB persistent bottom dock injected.');
+  };
+
+  const _doc: any = (globalThis as any).document;
+  const _win: any = (globalThis as any).window;
+
+  // Run on DOM events
+  if (_doc && _doc.readyState === 'loading') {
+    _doc.addEventListener('DOMContentLoaded', inject);
+  } else {
+    inject();
+  }
+  if (_win && typeof _win.addEventListener === 'function') {
+    _win.addEventListener('load', inject);
+  }
+
+  // Health check: ensure dock stays in DOM across SPA route transitions
+  setInterval(() => {
+    const d: any = (globalThis as any).document;
+    if (d && !d.getElementById(ROOT_ID) && (d.body || d.documentElement)) {
+      inject();
+    }
+  }, 2000);
+
+  // Listen for IPC updates from main process
+  ipcRenderer.on('hud-status', (_e, data: { batteryPercent: number; isCharging: boolean; latencyMs: number | null; appVersion?: string }) => {
+    if (data.batteryPercent !== undefined) currentBatteryPercent = data.batteryPercent;
+    if (data.isCharging !== undefined) currentIsCharging = data.isCharging;
+    if (data.latencyMs !== undefined) currentLatency = data.latencyMs;
+    if (data.appVersion) currentAppVersion = data.appVersion;
+    updateDockUI();
+  });
+
+  ipcRenderer.on('wifi-status', (_e, data: { ms: number | null }) => {
+    if (data.ms !== undefined) {
+      currentLatency = data.ms;
+      updateDockUI();
+    }
+  });
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+}
+
+try {
+  initializeSebBottomDock();
+} catch (e) {
+  console.warn('[SecureBrowser Preload] Failed to initialize SEB dock:', e);
+}

@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bluebirds Secure Browser — Security Gate</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      color: #f1f5f9;
+    }
+
+    .window {
+      width: 100%;
+      height: 100%;
+      background: #080d18;
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      border-radius: 12px;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 32px 80px rgba(0,0,0,0.95), 0 0 0 1px rgba(255,255,255,0.04);
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ── Top stripe ── */
+    .stripe {
+      height: 3px;
+      background: linear-gradient(90deg, #dc2626 0%, #ef4444 40%, #f97316 100%);
+      flex-shrink: 0;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      flex-shrink: 0;
+      background: rgba(12, 18, 34, 0.8);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .logo {
+      width: 30px;
+      height: 30px;
+      object-fit: contain;
+      filter: drop-shadow(0 2px 6px rgba(37, 99, 235, 0.4));
+    }
+
+    .brand-text {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand-name {
+      font-size: 12px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .brand-sub {
+      font-size: 10px;
+      color: #64748b;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .version-badge {
+      font-size: 9px;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #475569;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(30, 41, 59, 0.6);
+      padding: 3px 8px;
+      border-radius: 9999px;
+    }
+
+    /* ── Alert Banner ── */
+    .alert-banner {
+      margin: 14px 18px 0;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .alert-icon {
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .alert-icon svg {
+      width: 18px;
+      height: 18px;
+      color: #ef4444;
+    }
+
+    .alert-text h2 {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #fca5a5;
+      letter-spacing: -0.01em;
+      margin-bottom: 3px;
+    }
+
+    .alert-text p {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+
+    /* ── Process List ── */
+    .section-title {
+      font-size: 10px;
+      font-weight: 700;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      padding: 12px 18px 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      flex-shrink: 0;
+    }
+
+    .process-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.1) transparent;
+    }
+
+    .process-list::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .process-list::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .process-list::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.1);
+      border-radius: 2px;
+    }
+
+    .process-item {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 10px;
+      border-radius: 6px;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid rgba(239, 68, 68, 0.15);
+      transition: background 0.15s ease;
+      animation: fadeIn 0.2s ease-out forwards;
+    }
+
+    .process-item:hover {
+      background: rgba(239, 68, 68, 0.07);
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(3px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .process-item .proc-icon {
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+      color: #ef4444;
+    }
+
+    .process-name {
+      font-size: 11.5px;
+      font-weight: 500;
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .proc-badge {
+      margin-left: auto;
+      font-size: 9px;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color: #ef4444;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border: 1px solid rgba(239,68,68,0.3);
+      background: rgba(239, 68, 68, 0.08);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    /* ── Advice note ── */
+    .advisory {
+      margin: 10px 18px 0;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 10.5px;
+      color: #64748b;
+      line-height: 1.55;
+      flex-shrink: 0;
+    }
+
+    .advisory strong {
+      color: #94a3b8;
+    }
+
+    /* ── Action Buttons ── */
+    .actions {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 12px 18px 14px;
+      flex-shrink: 0;
+    }
+
+    .btn-auto-close {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      width: 100%;
+      height: 36px;
+      border-radius: 8px;
+      background: #dc2626;
+      border: none;
+      color: #ffffff;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      cursor: pointer;
+      transition: all 0.15s ease-in-out;
+      outline: none;
+    }
+
+    .btn-auto-close:hover:not(:disabled) {
+      background: #b91c1c;
+      box-shadow: 0 4px 20px rgba(220, 38, 38, 0.45);
+      transform: translateY(-1px);
+    }
+
+    .btn-auto-close:active:not(:disabled) {
+      transform: scale(0.98);
+      box-shadow: none;
+    }
+
+    .btn-auto-close:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-auto-close svg {
+      width: 14px;
+      height: 14px;
+      stroke: currentColor;
+      stroke-width: 2.4;
+    }
+
+    .btn-secondary-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-recheck {
+      flex: 1;
+      height: 30px;
+      border-radius: 7px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(30, 41, 59, 0.5);
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    .btn-recheck:hover:not(:disabled) {
+      background: rgba(51, 65, 85, 0.7);
+      border-color: rgba(255, 255, 255, 0.18);
+      color: #e2e8f0;
+    }
+
+    .btn-recheck:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .btn-quit {
+      flex: 1;
+      height: 30px;
+      border-radius: 7px;
+      border: 1px solid rgba(239, 68, 68, 0.25);
+      background: rgba(239, 68, 68, 0.08);
+      color: #fca5a5;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    .btn-quit:hover {
+      background: rgba(239, 68, 68, 0.2);
+      border-color: rgba(239, 68, 68, 0.4);
+      color: #ffffff;
+    }
+
+    /* ── Footer ── */
+    .footer {
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 8px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .footer-status {
+      font-size: 9.5px;
+      color: #475569;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .status-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #ef4444;
+      animation: blink 1.4s ease infinite;
+    }
+
+    .status-dot.ok {
+      background: #22c55e;
+      animation: none;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.2; }
+    }
+
+    .footer-version {
+      font-size: 9.5px;
+      color: #334155;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    /* ── Success overlay ── */
+    .success-overlay {
+      display: none;
+      position: absolute;
+      inset: 0;
+      background: rgba(8, 13, 24, 0.97);
+      border-radius: 12px;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      z-index: 10;
+    }
+
+    .success-overlay.visible {
+      display: flex;
+    }
+
+    .success-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: rgba(34, 197, 94, 0.15);
+      border: 2px solid rgba(34, 197, 94, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .success-icon svg {
+      width: 24px;
+      height: 24px;
+      color: #22c55e;
+    }
+
+    .success-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+
+    .success-sub {
+      font-size: 11px;
+      color: #64748b;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2px solid rgba(34,197,94,0.2);
+      border-top-color: #22c55e;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div class="window">
+    <div class="stripe"></div>
+
+    <!-- Header -->
+    <div class="header">
+      <div class="brand">
+        <img class="logo" src="./desktop_icon.png" alt="Bluebirds" />
+        <div class="brand-text">
+          <div class="brand-name">Bluebirds Solutions</div>
+          <div class="brand-sub">Secure Exam Browser</div>
+        </div>
+      </div>
+      <div class="version-badge" id="version-label">v—</div>
+    </div>
+
+    <!-- Alert banner -->
+    <div class="alert-banner">
+      <div class="alert-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+      </div>
+      <div class="alert-text">
+        <h2>Non-permitted Applications Detected</h2>
+        <p>The following applications must be closed before the exam can start. Use the <strong>Auto-Close</strong> button to terminate them automatically.</p>
+      </div>
+    </div>
+
+    <!-- Detected process list label -->
+    <div class="section-title">Detected Applications (<span id="proc-count">0</span>)</div>
+
+    <!-- Process list -->
+    <div class="process-list" id="process-list">
+      <!-- Injected dynamically by JS -->
+    </div>
+
+    <!-- Advisory -->
+    <div class="advisory">
+      <strong>Note:</strong> If the browser cannot start even after quitting the applications above, open <strong>Activity Monitor</strong> (macOS) or <strong>Task Manager</strong> (Windows) and force-quit any remaining instances of those processes, then click <strong>Re-Check</strong>.
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="actions">
+      <button class="btn-auto-close" id="btn-auto-close">
+        <svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+        </svg>
+        Auto-Close All &amp; Re-Check
+      </button>
+
+      <div class="btn-secondary-row">
+        <button class="btn-recheck" id="btn-recheck">Re-Check</button>
+        <button class="btn-quit" id="btn-quit">Quit Browser</button>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <div class="footer-status">
+        <div class="status-dot" id="status-dot"></div>
+        <span id="footer-status-text">Security Gate Active</span>
+      </div>
+      <div class="footer-version" id="footer-version">Bluebirds Secure Browser v—</div>
+    </div>
+
+    <!-- Success Overlay -->
+    <div class="success-overlay" id="success-overlay">
+      <div class="success-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </div>
+      <div class="success-title">Environment Clean</div>
+      <div class="success-sub">All prohibited applications terminated. Launching exam...</div>
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <script>
+    const { ipcRenderer } = require('electron');
+
+    // -- Version --
+    const version = window.location.hash.substring(1) || '';
+    const versionStr = version ? `v${version}` : 'v—';
+    document.getElementById('version-label').textContent = versionStr;
+    document.getElementById('footer-version').textContent = `Bluebirds Secure Browser ${versionStr}`;
+
+    // -- Process list rendering --
+    function renderProcesses(apps) {
+      const list = document.getElementById('process-list');
+      const count = document.getElementById('proc-count');
+      list.innerHTML = '';
+      count.textContent = apps.length;
+
+      apps.forEach((name, i) => {
+        const item = document.createElement('div');
+        item.className = 'process-item';
+        item.style.animationDelay = `${i * 40}ms`;
+        item.innerHTML = `
+          <svg class="proc-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>
+          </svg>
+          <span class="process-name">${name}</span>
+          <span class="proc-badge">BLOCKED</span>
+        `;
+        list.appendChild(item);
+      });
+    }
+
+    function setLoading(loading) {
+      document.getElementById('btn-auto-close').disabled = loading;
+      document.getElementById('btn-recheck').disabled = loading;
+      if (loading) {
+        document.getElementById('btn-auto-close').textContent = 'Terminating...';
+      } else {
+        document.getElementById('btn-auto-close').innerHTML = `
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+          </svg>
+          Auto-Close All &amp; Re-Check
+        `;
+      }
+    }
+
+    function showSuccess() {
+      document.getElementById('success-overlay').classList.add('visible');
+    }
+
+    // -- Load initial process list --
+    ipcRenderer.on('init-processes', (_e, data) => {
+      renderProcesses(data.forbiddenApps || []);
+    });
+
+    // -- Auto-Close button --
+    document.getElementById('btn-auto-close').addEventListener('click', () => {
+      setLoading(true);
+      ipcRenderer.send('prohibited-modal-auto-close');
+    });
+
+    // -- Re-Check button --
+    document.getElementById('btn-recheck').addEventListener('click', () => {
+      setLoading(true);
+      ipcRenderer.send('prohibited-modal-recheck');
+    });
+
+    // -- Quit button --
+    document.getElementById('btn-quit').addEventListener('click', () => {
+      ipcRenderer.send('prohibited-modal-quit');
+    });
+
+    // -- Result from main process --
+    ipcRenderer.on('check-result', (_e, data) => {
+      setLoading(false);
+      if (data.clean) {
+        document.getElementById('status-dot').classList.add('ok');
+        document.getElementById('footer-status-text').textContent = 'System Clean — Launching...';
+        showSuccess();
+      } else {
+        renderProcesses(data.forbiddenApps || []);
+      }
+    });
+  </script>
+</body>
+</html>

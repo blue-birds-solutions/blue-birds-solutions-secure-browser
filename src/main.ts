@@ -11,6 +11,7 @@ import {
   desktopCapturer,
   systemPreferences,
   shell,
+  powerMonitor,
 } from 'electron';
 import path from 'path';
 import os from 'os';
@@ -34,6 +35,7 @@ interface SystemStatus {
   antiScreenshot: boolean;
   multipleMonitors: boolean;
   os: NodeJS.Platform;
+  version?: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -163,11 +165,13 @@ const BLOCKED_SHORTCUTS: readonly string[] = [
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let mainWindow: BrowserWindow | null = null;
-let overlayWindow: BrowserWindow | null = null;
+let overlayWindow: BrowserWindow | null = null; // kept for type-compat but not used as separate window
 let splashWindow: BrowserWindow | null = null;
+let prohibitedWindow: BrowserWindow | null = null;
 let processMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let clipboardWiperInterval: ReturnType<typeof setInterval> | null = null;
 let wifiMonitorInterval: ReturnType<typeof setInterval> | null = null;
+let hudMonitorInterval: ReturnType<typeof setInterval> | null = null;
 let isExamActive = false;
 let isUpdateDownloaded = false;
 let isUpdating = false;
@@ -296,53 +300,30 @@ function createWindow(): void {
         splashWindow = null;
       }
 
-      // Show the overlay HUD — as a child window it will appear in the same
-      // kiosk/fullscreen space as mainWindow automatically.
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        syncOverlayPosition();
-        overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-        overlayWindow.show();
-        console.log('[SecureBrowser] Child HUD overlay shown after mainWindow ready-to-show.');
-      }
+      // Start preload-injected HUD monitor (battery + latency pushed via IPC)
+      startHudMonitor();
     }
   });
 
   mainWindow.on('enter-full-screen', (): void => {
-    // Child window follows automatically but re-assert position after a short
-    // delay because Cocoa re-layouts the frame when entering fullscreen.
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      setTimeout((): void => {
-        if (!overlayWindow || overlayWindow.isDestroyed()) return;
-        syncOverlayPosition();
-        overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-        overlayWindow.show();
-        console.log('[SecureBrowser] Child HUD position re-synced after enter-full-screen.');
-      }, 400);
-    }
+    // Re-send HUD status so the injected dock updates on fullscreen transition
+    sendHudStatusToRenderer();
   });
 
   mainWindow.on('resize', (): void => {
-    // Keep the HUD anchored to the bottom-right when the window is resized
-    // (important in dev mode and Windows windowed mode).
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      syncOverlayPosition();
-    }
+    // Nothing needed for DOM-injected dock
   });
 
-  // Synchronize overlay visibility on route navigations
+  // Synchronize HUD on route navigations (re-inject if SPA navigated away)
   mainWindow.webContents.on('did-navigate', (): void => {
-    updateOverlayVisibility();
+    sendHudStatusToRenderer();
   });
   mainWindow.webContents.on('did-navigate-in-page', (): void => {
-    updateOverlayVisibility();
+    sendHudStatusToRenderer();
   });
 
   mainWindow.on('focus', (): void => {
     mainWindow?.webContents.send('window-focus');
-    if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-      overlayWindow.moveTop();
-    }
     // When returning focus after a permission request, check if permission
     // has now been granted. If so, restore full lockout automatically.
     if (!IS_DEV && isRequestingPermission) {
@@ -412,10 +393,8 @@ function createWindow(): void {
 
   mainWindow.on('closed', (): void => {
     mainWindow = null;
+    stopHudMonitor();
   });
-
-  mainWindow.on('moved', syncOverlayPosition);
-  mainWindow.on('resized', syncOverlayPosition);
 
   // Intercept and block common cheat keyboard shortcuts inside the renderer
   mainWindow.webContents.on('before-input-event', (_event, input): void => {
@@ -518,113 +497,240 @@ function sendUpdateStatus(payload: UpdateStatusPayload): void {
   }
 }
 
-// ─── Overlay Window ─────────────────────────────────────────────────────────────
 
-const OVERLAY_WIDTH = 320;
-const OVERLAY_HEIGHT = 44;
-const OVERLAY_MARGIN = 18;
+// ─── Prohibited-Apps Native Modal ────────────────────────────────────────────
 
 /**
- * Computes the absolute screen position for the HUD pill.
- * When used as a child window the coordinates must be relative to the
- * mainWindow's content frame (NOT the physical screen).
+ * Creates and shows a native Electron window styled after the MSB/SEB security gate.
+ * Displays detected prohibited applications and provides Auto-Close / Re-Check / Quit.
+ * The window is modal to the splash screen (centered on screen) and is destroyed once
+ * the environment is clean. Returns a promise that resolves true when clean.
  */
-function computeOverlayBoundsRelative(): { x: number; y: number; width: number; height: number } {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    const { bounds } = screen.getPrimaryDisplay();
-    return {
-      x: bounds.width - OVERLAY_WIDTH - OVERLAY_MARGIN,
-      y: bounds.height - OVERLAY_HEIGHT - OVERLAY_MARGIN,
-      width: OVERLAY_WIDTH,
-      height: OVERLAY_HEIGHT,
-    };
-  }
-  const mb = mainWindow.getBounds();
-  return {
-    x: mb.width - OVERLAY_WIDTH - OVERLAY_MARGIN,
-    y: mb.height - OVERLAY_HEIGHT - OVERLAY_MARGIN,
-    width: OVERLAY_WIDTH,
-    height: OVERLAY_HEIGHT,
-  };
-}
-
-function createOverlayWindow(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    console.warn('[SecureBrowser] createOverlayWindow() called before mainWindow exists — skipping.');
+function createProhibitedWindow(forbiddenApps: string[]): void {
+  if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+    prohibitedWindow.focus();
     return;
   }
 
-  const relBounds = computeOverlayBoundsRelative();
-  console.log(`[SecureBrowser] Creating child HUD at relative x=${relBounds.x} y=${relBounds.y}`);
-
-  // CRITICAL: parent: mainWindow attaches this window to the same macOS Display Space
-  // as mainWindow. Without this, kiosk mode isolates mainWindow to its own macOS
-  // Presentation Space and independent windows (even type:'panel') stay on the desktop
-  // space behind the fullscreen kiosk — becoming permanently invisible.
-  overlayWindow = new BrowserWindow({
-    width: OVERLAY_WIDTH,
-    height: OVERLAY_HEIGHT,
-    x: relBounds.x,
-    y: relBounds.y,
-    parent: mainWindow,           // ← bind to same kiosk/fullscreen Display Space
+  prohibitedWindow = new BrowserWindow({
+    width: 480,
+    height: 520,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
-    skipTaskbar: true,
     resizable: false,
     movable: false,
-    focusable: false,
-    acceptFirstMouse: true,
-    hasShadow: false,
-    show: false,
-    // NOTE: do NOT use type:'panel' with a parent window — it conflicts with child-window
-    // Cocoa ordering and can cause the overlay to not appear in kiosk mode on Apple Silicon.
+    center: true,
+    skipTaskbar: true,
     webPreferences: {
-      nodeIntegration: true,    // Trusted local file — IPC via require('electron')
+      nodeIntegration: true,
       contextIsolation: false,
       sandbox: false,
     },
   });
 
-  overlayWindow.setIgnoreMouseEvents(false);
-
-  if (!IS_DEV) {
-    overlayWindow.setContentProtection(true);
-    overlayWindow.webContents.on('devtools-opened', () => {
-      overlayWindow?.webContents.closeDevTools();
-    });
+  if (process.platform === 'darwin') {
+    prohibitedWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
 
-  // visibleOnFullScreen ensures the child window appears over the macOS fullscreen
-  // presentation layer (menubar hidden / Spaces switching disabled).
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  const modalPath = path.join(__dirname, '..', 'src', 'prohibited-modal.html');
+  prohibitedWindow.loadFile(modalPath, { hash: app.getVersion() });
 
-  const overlayPath = path.join(__dirname, '..', 'src', 'overlay.html');
-  overlayWindow.loadFile(overlayPath);
-
-  overlayWindow.on('closed', (): void => {
-    overlayWindow = null;
+  prohibitedWindow.webContents.once('did-finish-load', () => {
+    if (!prohibitedWindow || prohibitedWindow.isDestroyed()) return;
+    prohibitedWindow.webContents.send('init-processes', { forbiddenApps });
   });
 
-  console.log('[SecureBrowser] Native child HUD pill created — bound to mainWindow kiosk space.');
+  prohibitedWindow.on('closed', (): void => {
+    prohibitedWindow = null;
+  });
+
+  prohibitedWindow.show();
+  console.log('[SecureBrowser] Prohibited-apps modal displayed with', forbiddenApps.length, 'violations.');
 }
 
+/**
+ * Displays the native prohibited-applications security gate modal (Image 3 layout)
+ * and blocks startup until all forbidden applications are closed or candidate quits.
+ * Returns true if the system is clean, false if candidate chose to quit.
+ */
+function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const isWindows = process.platform === 'win32';
+    let isResolved = false;
 
-/** Keep native HUD pill pinned to the bottom-right corner of the parent (mainWindow). */
-function syncOverlayPosition(): void {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const rel = computeOverlayBoundsRelative();
-  overlayWindow.setBounds(rel);
+    const finalize = (result: boolean) => {
+      if (isResolved) return;
+      isResolved = true;
+      ipcMain.removeListener('prohibited-modal-auto-close', handleAutoClose);
+      ipcMain.removeListener('prohibited-modal-recheck', handleRecheck);
+      ipcMain.removeListener('prohibited-modal-quit', handleQuit);
+      resolve(result);
+    };
+
+    const handleAutoClose = async () => {
+      console.log('[SecureBrowser] Modal auto-close initiated for forbidden apps...');
+      const procs = await getSystemProcesses(isWindows);
+      const { forbiddenApps } = getRunningViolations(procs);
+      for (const proc of forbiddenApps) {
+        await killProcess(proc, isWindows);
+      }
+      await new Promise((r) => setTimeout(r, 1200));
+
+      const afterProcs = await getSystemProcesses(isWindows);
+      const { forbiddenApps: remaining } = getRunningViolations(afterProcs);
+
+      if (remaining.length === 0) {
+        if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+          prohibitedWindow.webContents.send('check-result', { clean: true, forbiddenApps: [] });
+          setTimeout(() => {
+            if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+              prohibitedWindow.close();
+            }
+            finalize(true);
+          }, 1100);
+        } else {
+          finalize(true);
+        }
+      } else {
+        if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+          prohibitedWindow.webContents.send('check-result', { clean: false, forbiddenApps: remaining });
+        }
+      }
+    };
+
+    const handleRecheck = async () => {
+      console.log('[SecureBrowser] Modal re-check initiated...');
+      const procs = await getSystemProcesses(isWindows);
+      const { forbiddenApps: remaining } = getRunningViolations(procs);
+
+      if (remaining.length === 0) {
+        if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+          prohibitedWindow.webContents.send('check-result', { clean: true, forbiddenApps: [] });
+          setTimeout(() => {
+            if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+              prohibitedWindow.close();
+            }
+            finalize(true);
+          }, 1100);
+        } else {
+          finalize(true);
+        }
+      } else {
+        if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+          prohibitedWindow.webContents.send('check-result', { clean: false, forbiddenApps: remaining });
+        }
+      }
+    };
+
+    const handleQuit = () => {
+      console.log('[SecureBrowser] Candidate requested quit from prohibited modal.');
+      if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+        prohibitedWindow.close();
+      }
+      finalize(false);
+    };
+
+    ipcMain.on('prohibited-modal-auto-close', handleAutoClose);
+    ipcMain.on('prohibited-modal-recheck', handleRecheck);
+    ipcMain.on('prohibited-modal-quit', handleQuit);
+
+    createProhibitedWindow(initialForbiddenApps);
+
+    if (prohibitedWindow) {
+      prohibitedWindow.on('closed', () => {
+        finalize(false);
+      });
+    }
+  });
 }
 
-/** Ensures the native bottom-right HUD pill remains visible across all routes */
-function updateOverlayVisibility(): void {
-  if (!overlayWindow || overlayWindow.isDestroyed() || !mainWindow || mainWindow.isDestroyed()) return;
-  syncOverlayPosition();
-  if (!overlayWindow.isVisible()) {
-    overlayWindow.show();
+// ─── Preload-Injected HUD (Battery + Latency → Renderer) ─────────────────────
+
+let lastHudLatencyMs: number | null = null;
+
+let cachedBatteryPercent = 100;
+let cachedIsCharging = false;
+
+/**
+ * Sends current battery and latency state to the mainWindow renderer.
+ * The preload script injects a DOM dock that listens for this IPC event.
+ */
+function sendHudStatusToRenderer(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send('hud-status', {
+      batteryPercent: cachedBatteryPercent,
+      isCharging: cachedIsCharging,
+      latencyMs: lastHudLatencyMs,
+      appVersion: app.getVersion(),
+    });
+  } catch (e) {
+    console.warn('[SecureBrowser] sendHudStatusToRenderer error:', e);
   }
 }
+
+/** Reads battery percentage from macOS ioreg and caches it, then notifies renderer. */
+function refreshMacOSBattery(): void {
+  exec(
+    "ioreg -rn AppleSmartBattery | grep -E '\"CurrentCapacity\"|\"MaxCapacity\"|\"ExternalConnected\"'",
+    (err, stdout) => {
+      if (err || !stdout || !mainWindow || mainWindow.isDestroyed()) return;
+      try {
+        const currentMatch = stdout.match(/"CurrentCapacity"\s*=\s*(\d+)/);
+        const maxMatch     = stdout.match(/"MaxCapacity"\s*=\s*(\d+)/);
+        const chargingMatch = stdout.match(/"ExternalConnected"\s*=\s*(Yes|No|true|false)/i);
+        const current = currentMatch ? parseInt(currentMatch[1], 10) : 0;
+        const max     = maxMatch     ? parseInt(maxMatch[1], 10) : 1;
+        cachedBatteryPercent = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 100;
+        cachedIsCharging = chargingMatch ? /yes|true/i.test(chargingMatch[1]) : !powerMonitor.isOnBatteryPower();
+
+        sendHudStatusToRenderer();
+      } catch {}
+    }
+  );
+}
+
+/** Reads battery percentage from Windows WMIC and caches it. */
+function refreshWindowsBattery(): void {
+  exec('wmic path win32_battery get estimatedchargeremaining /format:value', (err, stdout) => {
+    if (err || !stdout || !mainWindow || mainWindow.isDestroyed()) return;
+    try {
+      const match = stdout.match(/EstimatedChargeRemaining=(\d+)/);
+      cachedBatteryPercent = match ? parseInt(match[1], 10) : 100;
+      cachedIsCharging = !powerMonitor.isOnBatteryPower();
+      sendHudStatusToRenderer();
+    } catch {}
+  });
+}
+
+function startHudMonitor(): void {
+  if (hudMonitorInterval !== null) return;
+
+  const refresh = (): void => {
+    if (process.platform === 'darwin') {
+      refreshMacOSBattery();
+    } else if (process.platform === 'win32') {
+      refreshWindowsBattery();
+    } else {
+      sendHudStatusToRenderer();
+    }
+  };
+
+  // Immediate first read
+  refresh();
+  hudMonitorInterval = setInterval(refresh, 10_000); // every 10 seconds
+  console.log('[SecureBrowser] HUD monitor started (battery refresh every 10s).');
+}
+
+function stopHudMonitor(): void {
+  if (hudMonitorInterval !== null) {
+    clearInterval(hudMonitorInterval);
+    hudMonitorInterval = null;
+  }
+}
+
+
 
 const pingAgent = new https.Agent({
   keepAlive: true,
@@ -687,8 +793,10 @@ function startWifiMonitor(): void {
     (IS_DEV ? 'https://tests.bluebirdstraining.com' : 'https://tests.bluebirdstraining.com');
 
   const sendStatus = (ms: number | null): void => {
-    if (overlayWindow) {
-      overlayWindow.webContents.send('wifi-status', { ms });
+    lastHudLatencyMs = ms;
+    sendHudStatusToRenderer();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('wifi-status', { ms });
     }
   };
 
@@ -1388,31 +1496,9 @@ async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolea
   }
 
   if (forbiddenApps.length > 0) {
-    console.log('[SecureBrowser] Auto-closing detected forbidden apps pre-launch:', forbiddenApps);
-    for (const proc of forbiddenApps) {
-      await killProcess(proc, isWindows);
-    }
-    // Give terminated apps a moment to exit completely
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-
-    // Re-check running processes
-    const remainingProcesses = await getSystemProcesses(isWindows);
-    const { forbiddenApps: remaining } = getRunningViolations(remainingProcesses);
-
-    if (remaining.length > 0) {
-      const appList = remaining.map((a) => `  • ${a}`).join('\n');
-      const choice = showModalDialog(parentWindow, {
-        type: 'warning',
-        title: 'Forbidden Applications Running',
-        message: `The following applications could not be terminated automatically:\n\n${appList}\n\nThey must be closed before entering the assessment.\n\nWould you like to retry or exit?`,
-        buttons: ['Retry / Recheck', 'Quit Secure Browser'],
-        defaultId: 0,
-        cancelId: 1,
-      });
-
-      if (choice === 0) {
-        return checkAndCleanSystem(parentWindow);
-      }
+    console.log('[SecureBrowser] Startup security gate: detected forbidden apps:', forbiddenApps);
+    const passed = await showProhibitedModalGate(forbiddenApps);
+    if (!passed) {
       return false;
     }
   }
@@ -1581,7 +1667,12 @@ ipcMain.handle('get-system-status', (): SystemStatus => {
     antiScreenshot: !IS_DEV,
     multipleMonitors: displays.length > 1,
     os: process.platform,
+    version: app.getVersion(),
   };
+});
+
+ipcMain.handle('get-app-version', (): string => {
+  return app.getVersion();
 });
 
 // ─── Process Management IPC Handlers ────────────────────────────────────────
@@ -1957,7 +2048,7 @@ async function initializeApp(): Promise<void> {
 
   // 4. Everything verified & updated — create and display the exam window
   createWindow();
-  createOverlayWindow();
+  startHudMonitor();
   installPermissionHandler(); // Must run after createWindow so session is ready
   startWifiMonitor();
   console.log('[SecureBrowser] Application initialized. High-impact security hooks deferred to exam start.');
@@ -2126,9 +2217,6 @@ if (!gotTheLock) {
       }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.hide();
-      }
-      if (overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.hide();
       }
       sendUpdateStatus({
         status: 'available',
