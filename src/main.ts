@@ -1071,6 +1071,12 @@ function performCleanExit(): void {
   try { stopWindowsKeyboardLock(); } catch {}
   try { globalShortcut.unregisterAll(); } catch {}
   try {
+    for (const win of secondaryBlackoutWindows) {
+      if (!win.isDestroyed()) win.destroy();
+    }
+    secondaryBlackoutWindows = [];
+  } catch {}
+  try {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.setKiosk(false);
       mainWindow.setFullScreen(false);
@@ -1291,6 +1297,150 @@ function sendSecurityStatus(status: SecurityStatus): void {
   }
 }
 
+// ─── Multi-Display Quarantine & Blackout Windows ─────────────────────────────
+
+let secondaryBlackoutWindows: BrowserWindow[] = [];
+
+/**
+ * Enforces dynamic multi-display quarantine. If an external display, AirPlay,
+ * or Sidecar is plugged in mid-exam, this immediately blacks out every secondary
+ * screen with an impassable full-screen lockdown window and halts exam progression.
+ */
+function updateDisplayQuarantine(): void {
+  if (IS_DEV) return;
+
+  const displays = screen.getAllDisplays();
+  const primaryDisplay = screen.getPrimaryDisplay();
+
+  if (displays.length <= 1) {
+    if (secondaryBlackoutWindows.length > 0) {
+      console.log('[SecureBrowser] Multi-display condition resolved. Tearing down blackout windows.');
+      for (const win of secondaryBlackoutWindows) {
+        try {
+          if (!win.isDestroyed()) win.destroy();
+        } catch {}
+      }
+      secondaryBlackoutWindows = [];
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('security-status-update', {
+        hasViolation: false,
+        type: null,
+        message: null,
+      });
+    }
+    return;
+  }
+
+  console.warn(`[SecureBrowser] Multiple displays detected (${displays.length}). Quarantining secondary displays.`);
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('security-status-update', {
+      hasViolation: true,
+      type: 'multiple-monitors',
+      message: 'Multiple monitors detected. Disconnect external displays to continue.',
+    });
+  }
+
+  const nonPrimaryDisplays = displays.filter((d) => d.id !== primaryDisplay.id);
+
+  // Recreate blackout overlay for each secondary screen if not already matched
+  if (secondaryBlackoutWindows.length !== nonPrimaryDisplays.length) {
+    for (const win of secondaryBlackoutWindows) {
+      try {
+        if (!win.isDestroyed()) win.destroy();
+      } catch {}
+    }
+    secondaryBlackoutWindows = [];
+
+    for (const d of nonPrimaryDisplays) {
+      try {
+        const blackout = new BrowserWindow({
+          x: d.bounds.x,
+          y: d.bounds.y,
+          width: d.bounds.width,
+          height: d.bounds.height,
+          frame: false,
+          kiosk: true,
+          alwaysOnTop: true,
+          backgroundColor: '#05070e',
+          movable: false,
+          resizable: false,
+          focusable: false,
+          skipTaskbar: true,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+          },
+        });
+
+        blackout.setAlwaysOnTop(true, 'screen-saver', 1);
+
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><style>
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+            background: #05070e;
+            color: #f87171;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            user-select: none;
+          }
+          .card {
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            background: rgba(18, 10, 16, 0.96);
+            padding: 40px;
+            border-radius: 16px;
+            max-width: 520px;
+            text-align: center;
+            box-shadow: 0 30px 60px rgba(0,0,0,0.9);
+          }
+          h1 { font-size: 20px; color: #fecaca; margin-bottom: 12px; }
+          p { font-size: 13px; color: #94a3b8; line-height: 1.6; margin-bottom: 20px; }
+          .badge {
+            display: inline-block;
+            padding: 7px 16px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            color: #ef4444;
+            font-size: 11px;
+            font-weight: 700;
+            border-radius: 9999px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+          }
+        </style></head><body><div class="card">
+          <h1>Secondary Screen Quarantined</h1>
+          <p>Bluebirds Secure Browser does not permit external monitors, screen extenders, or AirPlay during examinations.</p>
+          <div class="badge">Disconnect external screen to resume</div>
+        </div></body></html>`;
+
+        blackout.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+        secondaryBlackoutWindows.push(blackout);
+      } catch (e) {
+        console.warn('[SecureBrowser] Failed to create secondary blackout window:', e);
+      }
+    }
+  }
+}
+
+function startDisplayWatchdog(): void {
+  screen.on('display-added', () => {
+    console.log('[SecureBrowser] display-added event detected.');
+    updateDisplayQuarantine();
+  });
+  screen.on('display-removed', () => {
+    console.log('[SecureBrowser] display-removed event detected.');
+    updateDisplayQuarantine();
+  });
+  screen.on('display-metrics-changed', () => {
+    console.log('[SecureBrowser] display-metrics-changed event detected.');
+    updateDisplayQuarantine();
+  });
+}
+
 function startProcessMonitor(): void {
   if (processMonitorInterval !== null) return;
   const isWindows: boolean = process.platform === 'win32';
@@ -1298,18 +1448,8 @@ function startProcessMonitor(): void {
   console.log('[SecureBrowser] Starting periodic process monitor.');
 
   processMonitorInterval = setInterval((): void => {
-    // Check for multiple connected displays before querying processes
-    const displays = screen.getAllDisplays();
-    const multipleMonitors: boolean = displays.length > 1;
-
-    if (multipleMonitors && !IS_DEV) {
-      sendSecurityStatus({
-        hasViolation: true,
-        type: 'multiple-monitors',
-        message: 'Multiple monitors detected. Please disconnect external screens to continue.',
-      });
-      return;
-    }
+    // Dynamic multi-display quarantine
+    updateDisplayQuarantine();
 
     exec(queryCommand, (err, stdout): void => {
       if (err) {
@@ -1530,13 +1670,26 @@ async function checkAndCleanSystem(parentWindow?: BrowserWindow): Promise<boolea
   // Give system process/window closing events 1.5 seconds to settle
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
-  // 1. Check Displays
+  // 1. Check Displays (Physical, Virtual, Sidecar, AirPlay)
   const displays = screen.getAllDisplays();
-  if (displays.length > 1) {
+  const hasVirtualOrAirPlay = displays.some((d: any) => {
+    const label = (d.label || '').toLowerCase();
+    return (
+      label.includes('airplay') ||
+      label.includes('sidecar') ||
+      label.includes('duet') ||
+      label.includes('luna') ||
+      label.includes('virtual') ||
+      label.includes('displaylink')
+    );
+  });
+
+  if (displays.length > 1 || hasVirtualOrAirPlay) {
     const choice = showModalDialog(parentWindow, {
       type: 'warning',
-      title: 'Multiple Displays Connected',
-      message: 'Multiple monitors detected. External screens must be disconnected before starting the exam.',
+      title: 'External or Virtual Displays Connected',
+      message:
+        'Multiple monitors, AirPlay, Sidecar, or virtual screens detected.\n\nAll external and secondary displays must be disconnected before starting the examination.',
       buttons: ['Retry / Recheck', 'Quit Secure Browser'],
       defaultId: 0,
       cancelId: 1,
@@ -2004,6 +2157,7 @@ ipcMain.on('exam-finished', (): void => {
   unregisterGlobalShortcuts();
   stopProcessMonitor();
   stopClipboardWiper();
+  clearActiveSessionState();
   // DO NOT call suspendKioskLockout() here — the browser must strictly maintain fullscreen kiosk on macOS.
   if (isUpdateDownloaded) {
     console.log('[SecureBrowser] Installing postponed update after exam finished...');
@@ -2136,6 +2290,65 @@ async function initializeApp(): Promise<void> {
 }
 
 
+// ─── Crash Recovery & Active Session State ───────────────────────────────
+
+interface SavedSessionState {
+  attemptId: string | null;
+  assessmentId: string | null;
+  token: string | null;
+  timestamp: number;
+}
+
+function saveActiveSessionState(): void {
+  try {
+    const sessionFile = path.join(app.getPath('userData'), 'active_exam_session.json');
+    const state: SavedSessionState = {
+      attemptId: activeAttemptId,
+      assessmentId: activeAssessmentId,
+      token: activeToken,
+      timestamp: Date.now(),
+    };
+    fs.writeFileSync(sessionFile, JSON.stringify(state, null, 2), 'utf-8');
+    console.log('[SecureBrowser] Saved active session state for crash recovery.');
+  } catch (e) {
+    console.warn('[SecureBrowser] Failed to save active session state:', e);
+  }
+}
+
+function clearActiveSessionState(): void {
+  try {
+    const sessionFile = path.join(app.getPath('userData'), 'active_exam_session.json');
+    if (fs.existsSync(sessionFile)) {
+      fs.unlinkSync(sessionFile);
+      console.log('[SecureBrowser] Cleared active session state.');
+    }
+  } catch (e) {
+    console.warn('[SecureBrowser] Failed to clear active session state:', e);
+  }
+}
+
+function restoreActiveSessionState(): boolean {
+  try {
+    const sessionFile = path.join(app.getPath('userData'), 'active_exam_session.json');
+    if (!fs.existsSync(sessionFile)) return false;
+    const raw = fs.readFileSync(sessionFile, 'utf-8');
+    const state: SavedSessionState = JSON.parse(raw);
+    // Restore if session was recorded within the last 4 hours
+    if (state && Date.now() - state.timestamp < 4 * 60 * 60 * 1000) {
+      if ((state.attemptId || state.assessmentId) && state.token) {
+        activeAttemptId = state.attemptId;
+        activeAssessmentId = state.assessmentId;
+        activeToken = state.token;
+        console.log(`[SecureBrowser] Restored active exam session: attempt=${activeAttemptId}, assessment=${activeAssessmentId}`);
+        return true;
+      }
+    }
+  } catch (e) {
+    console.warn('[SecureBrowser] Failed to parse active session state:', e);
+  }
+  return false;
+}
+
 function handleDeepLink(urlStr: string): void {
   console.log(`[SecureBrowser] Deep link received: ${urlStr}`);
   wasOpenedViaDeepLink = true;
@@ -2151,6 +2364,7 @@ function handleDeepLink(urlStr: string): void {
       activeAttemptId = attemptId;
       activeAssessmentId = assessmentId;
       activeToken = token;
+      saveActiveSessionState();
       console.log(`[SecureBrowser] Deep link credentials stored: attempt=${attemptId}, assessment=${assessmentId}`);
     } else {
       console.warn('[SecureBrowser] Deep link missing attemptId/assessmentId or token. Ignoring.');
@@ -2250,6 +2464,9 @@ if (!gotTheLock) {
   // ─── App Lifecycle ───────────────────────────────────────────────────────────
 
   app.whenReady().then((): void => {
+    // Start dynamic multi-display hot-plug watchdog
+    startDisplayWatchdog();
+
     // Check if launched via deep link (Windows/Linux)
     const deepLinkArg = process.argv.find((arg): boolean =>
       arg.startsWith('bluebirds-sb://')
@@ -2262,6 +2479,14 @@ if (!gotTheLock) {
       // Set a short delay to allow open-url event to fire on macOS if launched via deep link.
       setTimeout((): void => {
         if (!wasOpenedViaDeepLink && !isInitialized) {
+          // Enterprise Crash Recovery Check:
+          const restored = restoreActiveSessionState();
+          if (restored) {
+            console.log('[SecureBrowser] Restoring active assessment session from crash/restart state.');
+            initializeApp();
+            return;
+          }
+
           const buttons = IS_DEV
             ? ['Quit Secure Browser', 'Bypass (Dev Mode Only)']
             : ['Quit Secure Browser'];

@@ -360,7 +360,7 @@ const secureBrowserAPI: SecureBrowserAPI = {
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke('get-app-version'),
 
-  appVersion: '1.1.21',
+  appVersion: '1.1.22',
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);
