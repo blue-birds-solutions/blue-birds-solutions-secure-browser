@@ -16,6 +16,7 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 import { exec, spawn } from 'child_process';
+import http from 'http';
 import https from 'https';
 import { autoUpdater } from 'electron-updater';
 
@@ -288,20 +289,12 @@ function createWindow(): void {
         mainWindow.focus();
         bringAppToFront();
       }
-      // In dev mode (no native fullscreen) show overlay immediately.
+      // In dev mode (no native fullscreen) sync overlay visibility.
       if (IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
-        overlayWindow.show();
-        overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-        overlayWindow.moveTop();
-        syncOverlayPosition();
+        updateOverlayVisibility();
       }
-      // Close splash screen only if an update is not actively downloading
-      if (isUpdating) {
-        mainWindow.hide();
-        if (overlayWindow && !overlayWindow.isDestroyed()) {
-          overlayWindow.hide();
-        }
-      } else if (splashWindow) {
+      // Close and destroy splash screen now that exam window is rendered and visible
+      if (splashWindow && !splashWindow.isDestroyed()) {
         splashWindow.destroy();
         splashWindow = null;
       }
@@ -314,15 +307,17 @@ function createWindow(): void {
         // (invisible to the user). We fix this by retrying every 500 ms for
         // up to 10 seconds. Once the overlay is confirmed visible on the
         // correct Space, we stop retrying.
-        //
-        // setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }) ensures
-        // the overlay is eligible to appear in the fullscreen Space; the loop
-        // forces macOS to re-evaluate its placement after the Space settles.
+        // If on an assessment page (/quiz/* or /system-check/*), hide the overlay.
         let retryCount = 0;
         const MAX_RETRIES = 20; // 20 × 500ms = 10 seconds
         const showOverlayRetry = setInterval((): void => {
           if (!overlayWindow || overlayWindow.isDestroyed()) {
             clearInterval(showOverlayRetry);
+            return;
+          }
+          const currentUrl = mainWindow?.webContents?.getURL() || '';
+          if (currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/')) {
+            overlayWindow.hide();
             return;
           }
           retryCount++;
@@ -339,11 +334,16 @@ function createWindow(): void {
         }, 500);
 
         // Additionally, keep re-asserting alwaysOnTop every 2 seconds forever
-        // so kiosk mode cannot bury the overlay if focus bounces.
+        // so kiosk mode cannot bury the overlay if focus bounces (when not on an assessment page).
         setInterval((): void => {
           if (overlayWindow && !overlayWindow.isDestroyed()) {
-            overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-            overlayWindow.moveTop();
+            const currentUrl = mainWindow?.webContents?.getURL() || '';
+            if (currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/')) {
+              if (overlayWindow.isVisible()) overlayWindow.hide();
+            } else {
+              overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+              overlayWindow.moveTop();
+            }
           }
         }, 2000);
       }
@@ -358,6 +358,11 @@ function createWindow(): void {
       // Give the Space animation a brief moment to settle (500ms)
       setTimeout((): void => {
         if (!overlayWindow || overlayWindow.isDestroyed()) return;
+        const currentUrl = mainWindow?.webContents?.getURL() || '';
+        if (currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/')) {
+          overlayWindow.hide();
+          return;
+        }
         syncOverlayPosition();
         overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
         overlayWindow.show();
@@ -368,12 +373,23 @@ function createWindow(): void {
     }
   });
 
+  // Synchronize overlay visibility on route navigations
+  mainWindow.webContents.on('did-navigate', (): void => {
+    updateOverlayVisibility();
+  });
+  mainWindow.webContents.on('did-navigate-in-page', (): void => {
+    updateOverlayVisibility();
+  });
+
   // Re-assert overlay whenever the main window gains focus so kiosk cannot bury it.
   mainWindow.on('focus', (): void => {
     mainWindow?.webContents.send('window-focus');
-    if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
-      overlayWindow.moveTop();
+    const currentUrl = mainWindow?.webContents?.getURL() || '';
+    if (!currentUrl.includes('/quiz/') && !currentUrl.includes('/system-check/')) {
+      if (!IS_DEV && overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+        overlayWindow.moveTop();
+      }
     }
     // When returning focus after a permission request, check if permission
     // has now been granted. If so, restore full lockout automatically.
@@ -623,6 +639,26 @@ function syncOverlayPosition(): void {
   overlayWindow.setBounds({ x: bounds.x, y: bounds.y, width: bounds.width, height: 44 });
 }
 
+/** Shows or hides the Electron overlay depending on whether the candidate is on an in-app assessment page */
+function updateOverlayVisibility(): void {
+  if (!overlayWindow || overlayWindow.isDestroyed() || !mainWindow || mainWindow.isDestroyed()) return;
+  const currentUrl = mainWindow.webContents.getURL() || '';
+  const isAssessmentOrCheck = currentUrl.includes('/quiz/') || currentUrl.includes('/system-check/');
+  if (isAssessmentOrCheck) {
+    if (overlayWindow.isVisible()) {
+      overlayWindow.hide();
+      console.log('[SecureBrowser] Hiding overlay window for assessment route:', currentUrl);
+    }
+  } else {
+    if (!overlayWindow.isVisible()) {
+      overlayWindow.show();
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 2);
+      overlayWindow.moveTop();
+      syncOverlayPosition();
+    }
+  }
+}
+
 const pingAgent = new https.Agent({
   keepAlive: true,
   keepAliveMsecs: 1000,
@@ -639,18 +675,20 @@ function pingTarget(targetUrl: string): Promise<number | null> {
     const start = Date.now();
 
     try {
-      const url = new URL(targetUrl);
-      const req = https.request(
+      const parsed = new URL(targetUrl);
+      const isHttps = parsed.protocol === 'https:';
+      const transport = isHttps ? https : http;
+
+      const req = transport.request(
         {
+          hostname: parsed.hostname,
+          port: parsed.port || (isHttps ? 443 : 80),
+          path: '/favicon.ico',
           method: 'HEAD',
-          hostname: url.hostname,
-          port: url.port ? parseInt(url.port.toString(), 10) : 443,
-          path: url.pathname + url.search,
-          timeout: 5000,
-          rejectUnauthorized: false, // Self-signed certs on internal deployments
-          agent: pingAgent,
+          agent: isHttps ? pingAgent : undefined,
+          headers: { 'Cache-Control': 'no-cache' },
         },
-        (res) => {
+        (res: http.IncomingMessage) => {
           clearTimeout(timeout);
           res.resume(); // Consume response to free socket back to agent pool
           resolve(Date.now() - start);
@@ -1793,6 +1831,77 @@ ipcMain.on('restore-fullscreen', (): void => {
 
 // ─── Deep Link & Single Instance Handler ──────────────────────────────────────
 
+/**
+ * Synchronous update gate executed while the splash screen is strictly front and center.
+ * If an update is detected, it stays on the splash screen, downloads the update with live
+ * progress, and restarts the app via autoUpdater.quitAndInstall().
+ *
+ * Returns true if an update was found and is downloading/restarting (mainWindow must NOT be created).
+ * Returns false if no update is available, dev mode, or check times out/errors (proceed to exam).
+ */
+function checkAndApplyUpdates(splash: BrowserWindow | null): Promise<boolean> {
+  if (IS_DEV) {
+    console.log('[AutoUpdater] Bypassing update check in DEV mode.');
+    return Promise.resolve(false);
+  }
+
+  return new Promise<boolean>((resolve) => {
+    let resolved = false;
+    const finish = (result: boolean): void => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(safetyTimeout);
+        resolve(result);
+      }
+    };
+
+    // Safety timeout: never block a student forever if Cloudflare or network is unreachable
+    const safetyTimeout = setTimeout((): void => {
+      console.warn('[AutoUpdater] Update check timed out after 5000ms. Continuing to exam.');
+      finish(false);
+    }, 5000);
+
+    sendUpdateStatus({ status: 'checking' });
+
+    autoUpdater.once('update-available', (info): void => {
+      console.log(`[AutoUpdater] Update available: v${info.version}. Retaining splash and downloading...`);
+      isUpdating = true;
+      clearTimeout(safetyTimeout);
+      sendUpdateStatus({
+        status: 'available',
+        version: info.version,
+      });
+      // Update is downloading on splash screen — prevent mainWindow creation
+      finish(true);
+    });
+
+    autoUpdater.once('update-not-available', (info): void => {
+      console.log(`[AutoUpdater] Client is up to date (v${app.getVersion()}).`);
+      isUpdating = false;
+      sendUpdateStatus({
+        status: 'not-available',
+        version: app.getVersion(),
+      });
+      finish(false);
+    });
+
+    autoUpdater.once('error', (err: Error): void => {
+      console.error('[AutoUpdater] Update check error:', err.message);
+      isUpdating = false;
+      sendUpdateStatus({
+        status: 'error',
+        error: err.message,
+      });
+      finish(false);
+    });
+
+    autoUpdater.checkForUpdates().catch((err: Error): void => {
+      console.error('[AutoUpdater] Error initiating update check:', err.message);
+      finish(false);
+    });
+  });
+}
+
 async function initializeApp(): Promise<void> {
   if (isInitialized) return;
   isInitialized = true;
@@ -1807,13 +1916,23 @@ async function initializeApp(): Promise<void> {
     startWindowsKeyboardLock();
   }
 
-  // Show splash immediately so the user sees something while system checks run.
+  // 1. Show splash immediately so the user sees something while checks run.
   createSplashWindow();
   if (splashWindow) {
     splashWindow.show();
     bringAppToFront();
   }
 
+  // 2. Synchronous update gate: check and apply updates while candidate is strictly on splash
+  if (!IS_DEV) {
+    const isRestartingForUpdate = await checkAndApplyUpdates(splashWindow);
+    if (isRestartingForUpdate) {
+      console.log('[SecureBrowser] Update in progress. Halting window creation to prevent premature UI loading.');
+      return;
+    }
+  }
+
+  // 3. Update check passed or bypassed: Run system checks & clean forbidden processes
   const clean = await checkAndCleanSystem(splashWindow ?? undefined);
   if (!clean) {
     console.log('[SecureBrowser] Startup requirements not met. Quitting.');
@@ -1821,6 +1940,7 @@ async function initializeApp(): Promise<void> {
     return;
   }
 
+  // 4. Everything verified & updated — create and display the exam window
   createWindow();
   createOverlayWindow();
   installPermissionHandler(); // Must run after createWindow so session is ready
@@ -2052,72 +2172,18 @@ if (!gotTheLock) {
         status: 'downloaded',
         version: info.version,
         percent: 100,
-        etaString: 'Restarting in 2s...',
+        etaString: 'Restarting in 1s...',
       });
 
       if (!isExamActive) {
         console.log('[AutoUpdater] Installing update and restarting client...');
         setTimeout((): void => {
           autoUpdater.quitAndInstall(false, true);
-        }, 1800);
+        }, 1500);
       } else {
-        console.log('[AutoUpdater] Update downloaded during an active exam session. Postponing installation.');
+        console.log('[AutoUpdater] Update downloaded during an active exam session. Postponing installation until exam finish.');
       }
     });
-
-    autoUpdater.on('update-not-available', (info): void => {
-      console.log(`[AutoUpdater] Client is up to date (v${app.getVersion()}).`);
-      isUpdating = false;
-      sendUpdateStatus({
-        status: 'not-available',
-        version: app.getVersion(),
-      });
-      if (splashWindow && mainWindow && !mainWindow.isDestroyed()) {
-        setTimeout((): void => {
-          if (splashWindow && !isUpdating) {
-            splashWindow.destroy();
-            splashWindow = null;
-          }
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.show();
-            mainWindow.focus();
-          }
-          if (overlayWindow && !overlayWindow.isDestroyed()) {
-            overlayWindow.show();
-          }
-        }, 400);
-      }
-    });
-
-    autoUpdater.on('error', (err: Error): void => {
-      console.error('[AutoUpdater] Update check error:', err.message);
-      isUpdating = false;
-      sendUpdateStatus({
-        status: 'error',
-        error: err.message,
-      });
-      if (splashWindow && mainWindow && !mainWindow.isDestroyed()) {
-        setTimeout((): void => {
-          if (splashWindow && !isUpdating) {
-            splashWindow.destroy();
-            splashWindow = null;
-          }
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.show();
-            mainWindow.focus();
-          }
-          if (overlayWindow && !overlayWindow.isDestroyed()) {
-            overlayWindow.show();
-          }
-        }, 400);
-      }
-    });
-
-    if (!IS_DEV) {
-      autoUpdater.checkForUpdatesAndNotify().catch((err: Error): void => {
-        console.error('[SecureBrowser] Failed to check for updates:', err.message);
-      });
-    }
 
     // Re-create window on macOS when the dock icon is clicked and no windows are open
     app.on('activate', (): void => {

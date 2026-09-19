@@ -178,6 +178,12 @@ interface SecureBrowserAPI {
    */
   onUpdateStatus: (callback: (status: any) => void) => Unsubscribe;
 
+  /**
+   * Subscribe to real-time network latency updates (ping in ms).
+   * @returns an unsubscribe function
+   */
+  onWifiStatus: (callback: (status: { ms: number | null }) => void) => Unsubscribe;
+
   /** Notifies the shell that the student has entered/started the exam. */
   startExam: () => void;
 
@@ -295,6 +301,16 @@ const secureBrowserAPI: SecureBrowserAPI = {
     ipcRenderer.on('auto-update-status', subscription);
     return (): void => {
       ipcRenderer.removeListener('auto-update-status', subscription);
+    };
+  },
+
+  // Real-time network latency status updates sent from main process
+  onWifiStatus: (callback: (status: { ms: number | null }) => void): Unsubscribe => {
+    const subscription = (_event: IpcRendererEvent, status: { ms: number | null }): void =>
+      callback(status);
+    ipcRenderer.on('wifi-status', subscription);
+    return (): void => {
+      ipcRenderer.removeListener('wifi-status', subscription);
     };
   },
 
