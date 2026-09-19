@@ -1134,12 +1134,19 @@ function parseProcessNames(stdout: string, isWindows: boolean): string[] {
   const lines = stdout.split('\n');
 
   if (isWindows) {
-    return lines
-      .map((line): string => {
-        const match = line.match(/^"([^"]+)"/);
-        return match ? match[1].toLowerCase() : '';
-      })
-      .filter(Boolean);
+    const procs: string[] = [];
+    for (const line of lines) {
+      const match = line.match(/^"([^"]+)"/);
+      if (match) {
+        const name = match[1].toLowerCase();
+        if (name) procs.push(name);
+      } else if (line.trim()) {
+        // Handles pipe-delimited processName|originalFilename if queried via PowerShell PE inspect
+        const parts = line.split('|').map((s) => s.trim().toLowerCase()).filter(Boolean);
+        procs.push(...parts);
+      }
+    }
+    return procs;
   }
 
   // On macOS, ps -ax -o comm= returns the full path or binary name.
@@ -1534,17 +1541,20 @@ function killProcess(name: string, isWindows: boolean): Promise<void> {
       return;
     }
 
-    // /T = terminate process and all of its children (process tree kill)
-    // On macOS: use exact-name match or app bundle match, not broad substring
-    const cmd = isWindows
-      ? `taskkill /F /T /IM "${name}"`
-      : `pkill -9 -i -x "${name}" 2>/dev/null || pkill -9 -i -f "${name}.app" 2>/dev/null`;
+    let cmd: string;
+    if (isWindows) {
+      const cleanName = name.replace(/\.exe$/i, '');
+      // Force kill entire process tree (/T) for both cleanName.exe and bare image name
+      cmd = `taskkill /F /T /IM "${cleanName}.exe" 2>nul & taskkill /F /T /IM "${cleanName}" 2>nul`;
+    } else {
+      cmd = `pkill -9 -i -x "${name}" 2>/dev/null || pkill -9 -i -f "${name}.app" 2>/dev/null`;
+    }
 
     console.log(`[SecureBrowser] Force-closing process: ${name} (cmd: ${cmd})`);
     exec(cmd, (err) => {
       if (err) {
         // Error code 128 means process not found — acceptable if already closed
-        console.warn(`[SecureBrowser] Failed to force close process ${name}:`, err.message);
+        console.warn(`[SecureBrowser] Process ${name} already terminated or not found:`, err.message);
       }
       resolve();
     });
@@ -1612,24 +1622,22 @@ function closeAllOtherGUIApps(): Promise<void> {
     };
 
     if (process.platform === 'win32') {
-      const whitelist = ['explorer', 'bluebirdssecurebrowser', 'electron'];
+      // In-memory PowerShell process pipeline termination (SEB Windows ApplicationMonitor equivalent)
+      const psScript = `
+        $ownId = [System.Diagnostics.Process]::GetCurrentProcess().Id;
+        Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.Id -ne $ownId } | ForEach-Object {
+          $name = $_.ProcessName.ToLower();
+          if ($name -notmatch 'explorer|bluebirds|electron|shellexperiencehost|searchhost|startmenuexperiencehost') {
+            try {
+              Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue;
+            } catch {}
+          }
+        }
+      `.replace(/\s+/g, ' ').trim();
 
       exec(
-        `powershell -NonInteractive -WindowStyle Hidden -Command "Get-Process | Where-Object {$_.MainWindowTitle -ne ''} | Select-Object -Unique -ExpandProperty ProcessName"`,
-        (err, stdout) => {
-          if (err || !stdout) { done(); return; }
-
-          const lines = stdout.split('\r\n').map(l => l.trim().toLowerCase()).filter(Boolean);
-          const toKill = lines.filter(name => !whitelist.some(w => name.includes(w)));
-
-          if (toKill.length === 0) { done(); return; }
-
-          console.log('[SecureBrowser] Auto-closing Windows GUI processes:', toKill);
-
-          // Batch-kill all in a single taskkill call via PowerShell to avoid spawning N processes
-          const killCmd = toKill.map(n => `taskkill /F /IM "${n}.exe"`).join(' & ');
-          exec(killCmd, () => done());
-        }
+        `powershell -NonInteractive -WindowStyle Hidden -Command "${psScript}"`,
+        () => done()
       );
     } else if (process.platform === 'darwin') {
       // Fire all pkill calls in parallel — no blocking osascript calls
