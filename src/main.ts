@@ -237,7 +237,7 @@ function createWindow(): void {
     width: 1280,
     height: 800,
     show: false,           // Start hidden to prevent white flash
-    backgroundColor: '#0a0b0f', // Dark background matches theme
+    backgroundColor: '#ffffff', // Clean white theme background
     fullscreen: !IS_DEV,
     kiosk: !IS_DEV,        // Locks user into foreground, intercepts OS commands
     alwaysOnTop: !IS_DEV,
@@ -805,7 +805,7 @@ const pingAgent = new https.Agent({
  */
 function pingTarget(targetUrl: string): Promise<number | null> {
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => resolve(null), 6000);
+    const timeout = setTimeout(() => resolve(null), 2500);
     const start = Date.now();
 
     try {
@@ -821,7 +821,7 @@ function pingTarget(targetUrl: string): Promise<number | null> {
           method: 'HEAD',
           agent: isHttps ? pingAgent : undefined,
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) BluebirdsSecureApp/1.1.22 Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) BluebirdsSecureApp/1.2.1 Chrome/120.0.0.0 Safari/537.36',
             'Cache-Control': 'no-cache',
             'Accept': '*/*',
           },
@@ -1066,6 +1066,8 @@ function registerEmergencyExitShortcut(): void {
 /** Performs a clean, ordered emergency application shutdown. */
 function performCleanExit(): void {
   console.log('[SecureBrowser] performCleanExit: tearing down all locks and exiting.');
+  try { if (wifiMonitorInterval) { clearInterval(wifiMonitorInterval); wifiMonitorInterval = null; } } catch {}
+  try { if (hudMonitorInterval) { clearInterval(hudMonitorInterval); hudMonitorInterval = null; } } catch {}
   try { stopProcessMonitor(); } catch {}
   try { stopClipboardWiper(); } catch {}
   try { stopWindowsKeyboardLock(); } catch {}
@@ -1077,14 +1079,26 @@ function performCleanExit(): void {
     secondaryBlackoutWindows = [];
   } catch {}
   try {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setKiosk(false);
-      mainWindow.setFullScreen(false);
-      mainWindow.setAlwaysOnTop(false);
+    if (prohibitedWindow && !prohibitedWindow.isDestroyed()) {
+      prohibitedWindow.destroy();
+      prohibitedWindow = null;
     }
   } catch {}
-  // Force process exit — app.quit() may not flush if kiosk prevents it
-  app.exit(0);
+  try {
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.destroy();
+      splashWindow = null;
+    }
+  } catch {}
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.destroy();
+      mainWindow = null;
+    }
+  } catch {}
+  // Immediate process termination — avoids waiting for pending socket timeouts (e.g. offline state)
+  try { app.exit(0); } catch {}
+  try { process.exit(0); } catch {}
 }
 
 // ─── Global Shortcut Blocker ─────────────────────────────────────────────────

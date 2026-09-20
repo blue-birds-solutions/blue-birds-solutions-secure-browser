@@ -93,10 +93,12 @@ async function uploadFile(fileName) {
   const filePath = path.join(RELEASE_DIR, fileName);
   if (!fs.existsSync(filePath)) return;
 
+  const stat = fs.statSync(filePath);
   const fileStream = fs.createReadStream(filePath);
   const contentType = getContentType(fileName);
+  const sizeMb = (stat.size / (1024 * 1024)).toFixed(2);
   
-  console.log(`[Upload] Starting upload: ${fileName} (${contentType})...`);
+  console.log(`[Upload] Starting upload: ${fileName} (${sizeMb} MB, ${contentType})...`);
   
   try {
     await s3Client.send(
@@ -104,10 +106,11 @@ async function uploadFile(fileName) {
         Bucket: BUCKET_NAME,
         Key: fileName,
         Body: fileStream,
+        ContentLength: stat.size,
         ContentType: contentType,
       })
     );
-    console.log(`[Upload] Success: ${fileName} uploaded to R2 bucket "${BUCKET_NAME}"`);
+    console.log(`[Upload] Success: ${fileName} (${sizeMb} MB) uploaded to R2 bucket "${BUCKET_NAME}"`);
   } catch (err) {
     console.error(`[Upload] Failed to upload ${fileName}:`, err);
     throw err;

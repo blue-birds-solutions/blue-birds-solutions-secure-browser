@@ -27,14 +27,15 @@
       justify-content: space-between;
       gap: 10px;
       height: 40px;
-      padding: 0 12px;
+      padding: 0 14px;
       margin: 2px;
-      background: rgba(15, 23, 42, 0.94);
+      background: rgba(255, 255, 255, 0.96);
       backdrop-filter: blur(20px) saturate(1.8);
       -webkit-backdrop-filter: blur(20px) saturate(1.8);
-      border: 1px solid rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(203, 213, 225, 0.9);
       border-radius: 20px;
-      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55), 0 0 1px rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12), 0 1px 3px rgba(0, 0, 0, 0.05);
+      color: #0f172a;
     }
 
     /* ─── Latency / Wi-Fi Segment ─── */
@@ -42,23 +43,23 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 3px 6px;
+      padding: 3px 4px;
       border-radius: 12px;
     }
 
     .pulse-dot {
-      width: 6px;
-      height: 6px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
-      background: var(--wifi-color, #22c55e);
-      box-shadow: 0 0 0 0 var(--wifi-color, #22c55e);
+      background: var(--wifi-color, #10b981);
+      box-shadow: 0 0 0 0 var(--wifi-color, #10b981);
       animation: pulse-ring 2.2s ease-out infinite;
       flex-shrink: 0;
       transition: background 0.3s ease;
     }
 
     @keyframes pulse-ring {
-      0%   { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+      0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
       70%  { box-shadow: 0 0 0 6px transparent; }
       100% { box-shadow: 0 0 0 0 transparent; }
     }
@@ -67,36 +68,51 @@
       display: flex;
       align-items: flex-end;
       gap: 1.5px;
-      height: 12px;
+      height: 13px;
     }
 
     .wifi-bar {
       width: 2.5px;
       border-radius: 1px;
-      background: rgba(255, 255, 255, 0.2);
+      background: #cbd5e1;
       transition: background 0.3s ease;
     }
 
-    .wifi-bar:nth-child(1) { height: 3.5px; }
-    .wifi-bar:nth-child(2) { height: 6px; }
-    .wifi-bar:nth-child(3) { height: 8.5px; }
-    .wifi-bar:nth-child(4) { height: 11px; }
-    .wifi-bar.active { background: var(--wifi-color, #22c55e); }
-
-    #ping-label {
-      font-size: 11px;
-      font-weight: 700;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      color: var(--wifi-color, #22c55e);
-      letter-spacing: -0.02em;
-      min-width: 48px;
-    }
+    .wifi-bar:nth-child(1) { height: 4px; }
+    .wifi-bar:nth-child(2) { height: 7px; }
+    .wifi-bar:nth-child(3) { height: 10px; }
+    .wifi-bar:nth-child(4) { height: 13px; }
+    .wifi-bar.active { background: var(--wifi-color, #10b981); }
 
     /* ─── Divider ─── */
     .hud-divider {
       width: 1px;
       height: 16px;
-      background: rgba(255, 255, 255, 0.12);
+      background: #e2e8f0;
+    }
+
+    /* ─── Remaining Time Segment ─── */
+    .timer-container {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #334155;
+      font-weight: 600;
+      font-size: 11.5px;
+    }
+
+    .timer-container svg {
+      width: 13px;
+      height: 13px;
+      color: #64748b;
+    }
+
+    #remaining-timer-val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #0f172a;
+      letter-spacing: 0.02em;
     }
 
     /* ─── Battery Segment ─── */
@@ -104,14 +120,14 @@
       display: flex;
       align-items: center;
       gap: 5px;
-      color: #94a3b8;
+      color: #475569;
     }
 
     .battery-icon-wrapper {
       position: relative;
       width: 20px;
       height: 11px;
-      border: 1.5px solid rgba(255, 255, 255, 0.4);
+      border: 1.5px solid #94a3b8;
       border-radius: 3px;
       padding: 1px;
       display: flex;
@@ -125,14 +141,14 @@
       top: 2.5px;
       width: 2px;
       height: 4px;
-      background: rgba(255, 255, 255, 0.4);
+      background: #94a3b8;
       border-radius: 0 1px 1px 0;
     }
 
     .battery-level-fill {
       height: 100%;
       width: 75%;
-      background: #22c55e;
+      background: #10b981;
       border-radius: 1px;
       transition: width 0.4s ease, background 0.4s ease;
     }
@@ -141,7 +157,7 @@
       display: none;
       width: 10px;
       height: 10px;
-      color: #facc15;
+      color: #d97706;
     }
 
     .charging .charge-bolt {
@@ -151,7 +167,7 @@
     #battery-label {
       font-size: 11px;
       font-weight: 600;
-      color: #e2e8f0;
+      color: #334155;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
     }
 
@@ -163,9 +179,9 @@
       height: 26px;
       padding: 0 10px;
       border-radius: 13px;
-      border: 1px solid rgba(239, 68, 68, 0.5);
-      background: rgba(239, 68, 68, 0.18);
-      color: #fca5a5;
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      background: #fef2f2;
+      color: #dc2626;
       font-size: 11px;
       font-weight: 700;
       cursor: pointer;
@@ -178,7 +194,7 @@
       background: #dc2626;
       border-color: #ef4444;
       color: #ffffff;
-      box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+      box-shadow: 0 2px 8px rgba(220, 38, 38, 0.35);
     }
 
     #close-btn:active {
@@ -195,8 +211,8 @@
 </head>
 <body>
   <div id="hud-pill">
-    <!-- Latency / Wi-Fi -->
-    <div class="hud-segment" title="Network Ping to Server">
+    <!-- Latency / Wi-Fi (Clean symbol without ms text) -->
+    <div class="hud-segment" id="wifi-segment" title="Network Status: Connected">
       <div class="pulse-dot" id="pulse"></div>
       <div class="wifi-bars" id="wifi-bars">
         <div class="wifi-bar" id="b1"></div>
@@ -204,7 +220,18 @@
         <div class="wifi-bar" id="b3"></div>
         <div class="wifi-bar" id="b4"></div>
       </div>
-      <span id="ping-label">… ms</span>
+    </div>
+
+    <div class="hud-divider"></div>
+
+    <!-- Exam Remaining Time -->
+    <div class="hud-segment timer-container" id="remaining-timer-box" title="Exam Remaining Time">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <span style="color:#64748b; font-size:10.5px; font-weight:600;">Remaining:</span>
+      <span id="remaining-timer-val">--:--</span>
     </div>
 
     <div class="hud-divider"></div>
@@ -235,44 +262,45 @@
   <script>
     const { ipcRenderer } = require('electron');
 
-    const pingLabel   = document.getElementById('ping-label');
-    const pulseEl     = document.getElementById('pulse');
-    const bars        = [
+    const pulseEl       = document.getElementById('pulse');
+    const wifiSegment   = document.getElementById('wifi-segment');
+    const bars          = [
       document.getElementById('b1'),
       document.getElementById('b2'),
       document.getElementById('b3'),
       document.getElementById('b4'),
     ];
-    const batFill     = document.getElementById('bat-fill');
-    const batLabel    = document.getElementById('battery-label');
-    const batBox      = document.getElementById('battery-box');
-    const closeBtn    = document.getElementById('close-btn');
+    const batFill       = document.getElementById('bat-fill');
+    const batLabel      = document.getElementById('battery-label');
+    const batBox        = document.getElementById('battery-box');
+    const closeBtn      = document.getElementById('close-btn');
+    const timerVal      = document.getElementById('remaining-timer-val');
 
-    // ── 1. Latency Tripartite Quality ──
+    // ── 1. Latency Tripartite Quality (Green / Amber / Red WiFi Symbol) ──
     function applyQuality(ms) {
-      let color, activeBars, label;
+      let color, activeBars, tooltip;
 
       if (ms === null || ms === undefined) {
-        color = '#ef4444';
+        color = '#ef4444'; // Red
         activeBars = 0;
-        label = 'Offline';
+        tooltip = 'Network: Disconnected / Offline';
       } else if (ms < 400) {
-        color = '#22c55e'; // Emerald Green
+        color = '#10b981'; // Green (Healthy)
         activeBars = 4;
-        label = `${ms} ms`;
+        tooltip = 'Network: Excellent';
       } else if (ms < 999) {
-        color = '#f59e0b'; // Amber
+        color = '#f59e0b'; // Amber (Moderate)
         activeBars = 2;
-        label = `${ms} ms`;
+        tooltip = 'Network: Moderate Latency';
       } else {
-        color = '#ef4444'; // Crimson Red
+        color = '#ef4444'; // Red (High Latency)
         activeBars = 1;
-        label = '999+ ms';
+        tooltip = 'Network: High Latency';
       }
 
       document.documentElement.style.setProperty('--wifi-color', color);
-      pingLabel.style.color = color;
       pulseEl.style.background = color;
+      wifiSegment.setAttribute('title', tooltip);
 
       bars.forEach((bar, i) => {
         if (i < activeBars) {
@@ -281,12 +309,16 @@
           bar.classList.remove('active');
         }
       });
-
-      pingLabel.textContent = label;
     }
 
     ipcRenderer.on('wifi-status', (_event, data) => {
       applyQuality(data.ms);
+    });
+
+    ipcRenderer.on('exam-timer-sync', (_event, data) => {
+      if (data && data.text && timerVal) {
+        timerVal.textContent = data.text;
+      }
     });
 
     // ── 2. Native Battery Level Monitor ──
@@ -301,7 +333,7 @@
 
             if (battery.charging) {
               batBox.classList.add('charging');
-              batFill.style.background = '#22c55e';
+              batFill.style.background = '#10b981';
             } else {
               batBox.classList.remove('charging');
               if (level <= 15) {
@@ -309,7 +341,7 @@
               } else if (level <= 30) {
                 batFill.style.background = '#f59e0b';
               } else {
-                batFill.style.background = '#22c55e';
+                batFill.style.background = '#10b981';
               }
             }
           };

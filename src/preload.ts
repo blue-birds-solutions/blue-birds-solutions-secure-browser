@@ -233,6 +233,9 @@ interface SecureBrowserAPI {
   /** Re-enforces native OS fullscreen and kiosk constraints. */
   restoreFullscreen: () => void;
 
+  /** Synchronize active exam countdown timer string (e.g. "59:26") to the native top HUD. */
+  syncExamTimer: (timerText: string) => void;
+
   /** Returns application version string. */
   getAppVersion: () => Promise<string>;
 
@@ -245,6 +248,20 @@ interface SecureBrowserAPI {
 const secureBrowserAPI: SecureBrowserAPI = {
   // Sentinel — renderer code uses this to detect the secure shell environment
   isSecureShell: () => true,
+
+  // Synchronize exam countdown timer to native HUD
+  syncExamTimer: (timerText: string): void => {
+    try {
+      const _doc: any = (globalThis as any).document;
+      if (_doc) {
+        const root = _doc.getElementById('__bb_seb_dock_root__');
+        if (root && root.shadowRoot) {
+          const timerEl = root.shadowRoot.getElementById('dock-timer-val');
+          if (timerEl) timerEl.textContent = timerText;
+        }
+      }
+    } catch {}
+  },
 
   // Relay the system-status IPC call to the main process
   getSystemStatus: (): Promise<SystemStatus> =>
@@ -360,7 +377,7 @@ const secureBrowserAPI: SecureBrowserAPI = {
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke('get-app-version'),
 
-  appVersion: '1.1.22',
+  appVersion: '1.2.1',
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);
@@ -378,7 +395,7 @@ function initializeSebBottomDock(): void {
   let currentLatency: number | null = typeof navigator !== 'undefined' && (navigator as any).onLine ? 24 : null;
   let currentBatteryPercent = 100;
   let currentIsCharging = false;
-  let currentAppVersion = 'v1.1.22';
+  let currentAppVersion = 'v1.2.1';
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const createDockDOM = (shadow: any) => {
@@ -401,14 +418,14 @@ function initializeSebBottomDock(): void {
           display: inline-flex;
           align-items: center;
           gap: 10px;
-          background: rgba(10, 15, 29, 0.88);
+          background: rgba(255, 255, 255, 0.96);
           backdrop-filter: blur(20px);
           -webkit-backdrop-filter: blur(20px);
-          border: 1px solid rgba(255, 255, 255, 0.12);
+          border: 1px solid rgba(203, 213, 225, 0.9);
           border-radius: 9999px;
           padding: 5px 14px 5px 12px;
-          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05);
-          color: #f1f5f9;
+          box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12), 0 1px 3px rgba(0, 0, 0, 0.05);
+          color: #0f172a;
           font-size: 11.5px;
           user-select: none;
           -webkit-user-select: none;
@@ -416,9 +433,9 @@ function initializeSebBottomDock(): void {
         }
 
         .dock:hover {
-          background: rgba(15, 23, 42, 0.94);
-          border-color: rgba(255, 255, 255, 0.2);
-          box-shadow: 0 12px 40px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+          background: #ffffff;
+          border-color: #cbd5e1;
+          box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
         }
 
         .brand {
@@ -438,8 +455,8 @@ function initializeSebBottomDock(): void {
         }
 
         .brand-title {
-          font-weight: 600;
-          color: #e2e8f0;
+          font-weight: 700;
+          color: #0f172a;
           font-size: 11px;
           letter-spacing: -0.01em;
         }
@@ -447,17 +464,17 @@ function initializeSebBottomDock(): void {
         .version-tag {
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
           font-size: 9.5px;
-          color: #94a3b8;
-          background: rgba(255, 255, 255, 0.06);
+          color: #64748b;
+          background: #f1f5f9;
           padding: 1px 5px;
           border-radius: 4px;
-          border: 1px solid rgba(255, 255, 255, 0.06);
+          border: 1px solid #e2e8f0;
         }
 
         .divider {
           width: 1px;
           height: 14px;
-          background: rgba(255, 255, 255, 0.12);
+          background: #e2e8f0;
         }
 
         .stat-item {
@@ -480,9 +497,9 @@ function initializeSebBottomDock(): void {
         }
 
         /* Wifi colors */
-        .wifi-green { color: #34d399; }
-        .wifi-amber { color: #fbbf24; }
-        .wifi-red   { color: #f87171; }
+        .wifi-green { color: #10b981; }
+        .wifi-amber { color: #f59e0b; }
+        .wifi-red   { color: #ef4444; }
 
         /* Battery fill */
         .battery-container {
@@ -494,6 +511,7 @@ function initializeSebBottomDock(): void {
         .battery-svg {
           width: 20px;
           height: 12px;
+          color: #64748b;
         }
 
         .battery-bolt {
@@ -503,12 +521,21 @@ function initializeSebBottomDock(): void {
           transform: translate(-50%, -50%);
           width: 9px;
           height: 9px;
-          color: #fbbf24;
+          color: #f59e0b;
           display: none;
         }
 
         .battery-bolt.active {
           display: block;
+        }
+
+        /* Timer display */
+        .timer-val {
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+          font-size: 11.5px;
+          font-weight: 700;
+          color: #0f172a;
+          letter-spacing: 0.02em;
         }
 
         /* Exit Button */
@@ -518,20 +545,21 @@ function initializeSebBottomDock(): void {
           display: flex;
           align-items: center;
           gap: 4px;
-          background: rgba(239, 68, 68, 0.15);
-          border: 1px solid rgba(239, 68, 68, 0.35);
-          color: #fca5a5;
+          background: #fef2f2;
+          border: 1px solid rgba(239, 68, 68, 0.4);
+          color: #dc2626;
           padding: 3px 8px;
           border-radius: 9999px;
           font-size: 10.5px;
-          font-weight: 600;
+          font-weight: 700;
           transition: all 0.15s ease;
         }
 
         .exit-btn:hover {
-          background: rgba(239, 68, 68, 0.3);
-          border-color: rgba(239, 68, 68, 0.6);
+          background: #dc2626;
+          border-color: #ef4444;
           color: #ffffff;
+          box-shadow: 0 2px 8px rgba(220, 38, 38, 0.35);
         }
 
         .exit-btn:active {
@@ -543,7 +571,7 @@ function initializeSebBottomDock(): void {
           height: 12px;
         }
 
-        /* In-App Confirmation Modal (Zero Focus-Loss, Zero Tab-Switch Violations) */
+        /* In-App Confirmation Modal (Zero Focus-Loss, Zero Tab-Switch Violations, Clean White Theme) */
         .modal-overlay {
           pointer-events: auto;
           position: fixed;
@@ -552,7 +580,7 @@ function initializeSebBottomDock(): void {
           transform: translateX(-50%);
           width: 100vw;
           height: 100vh;
-          background: rgba(15, 23, 42, 0.7);
+          background: rgba(15, 23, 42, 0.45);
           backdrop-filter: blur(8px);
           -webkit-backdrop-filter: blur(8px);
           display: flex;
@@ -566,14 +594,14 @@ function initializeSebBottomDock(): void {
         }
 
         .modal-dialog {
-          background: #1e293b;
-          border: 1px solid rgba(255, 255, 255, 0.15);
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
           border-radius: 16px;
           padding: 24px 28px;
           max-width: 420px;
           width: 90%;
           text-align: center;
-          box-shadow: 0 24px 50px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+          box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.04);
           animation: modalIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
@@ -586,8 +614,8 @@ function initializeSebBottomDock(): void {
           width: 48px;
           height: 48px;
           margin: 0 auto 14px;
-          background: rgba(245, 158, 11, 0.15);
-          border: 1px solid rgba(245, 158, 11, 0.3);
+          background: #fffbeb;
+          border: 1px solid #fde68a;
           border-radius: 50%;
           display: flex;
           align-items: center;
@@ -597,13 +625,13 @@ function initializeSebBottomDock(): void {
         .modal-icon-badge svg {
           width: 24px;
           height: 24px;
-          color: #f59e0b;
+          color: #d97706;
         }
 
         .modal-heading {
           font-size: 16px;
           font-weight: 700;
-          color: #f8fafc;
+          color: #0f172a;
           margin-bottom: 8px;
           letter-spacing: -0.01em;
         }
@@ -611,7 +639,7 @@ function initializeSebBottomDock(): void {
         .modal-description {
           font-size: 12.5px;
           line-height: 1.5;
-          color: #94a3b8;
+          color: #64748b;
           margin-bottom: 20px;
         }
 
@@ -636,13 +664,14 @@ function initializeSebBottomDock(): void {
         }
 
         .modal-btn-stay {
-          background: rgba(255, 255, 255, 0.08);
-          border: 1px solid rgba(255, 255, 255, 0.14);
-          color: #f1f5f9;
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          color: #334155;
         }
 
         .modal-btn-stay:hover {
-          background: rgba(255, 255, 255, 0.15);
+          background: #f1f5f9;
+          border-color: #cbd5e1;
         }
 
         .modal-btn-quit {
@@ -661,20 +690,31 @@ function initializeSebBottomDock(): void {
         <div class="brand" title="Bluebirds Secure Browser">
           <span class="brand-badge">BB</span>
           <span class="brand-title">Secure</span>
-          <span class="version-tag" id="dock-version">v1.1.21</span>
+          <span class="version-tag" id="dock-version">v1.2.1</span>
         </div>
 
         <div class="divider"></div>
 
-        <!-- Latency -->
-        <div class="stat-item" id="dock-wifi-stat" title="Network Connection & Latency">
+        <!-- Latency / Wi-Fi (Clean symbol without ms text) -->
+        <div class="stat-item" id="dock-wifi-stat" title="Network Connection">
           <svg class="icon wifi-green" id="dock-wifi-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
             <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
             <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
             <line x1="12" y1="20" x2="12.01" y2="20"/>
           </svg>
-          <span class="mono wifi-green" id="dock-latency-val">-- ms</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <!-- Exam Remaining Time -->
+        <div class="stat-item" id="dock-timer-stat" title="Exam Time Remaining">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
+          <span style="color:#64748b; font-size:10.5px; font-weight:600;">Remaining:</span>
+          <span class="timer-val" id="dock-timer-val">--:--</span>
         </div>
 
         <div class="divider"></div>
@@ -685,24 +725,24 @@ function initializeSebBottomDock(): void {
             <svg class="battery-svg" viewBox="0 0 26 14" fill="none" xmlns="http://www.w3.org/2000/svg">
               <rect x="0.5" y="0.5" width="22" height="13" rx="2.5" stroke="currentColor" stroke-opacity="0.5"/>
               <path d="M24 5V9" stroke="currentColor" stroke-opacity="0.5" stroke-linecap="round"/>
-              <rect id="dock-battery-bar" x="2" y="2" width="19" height="10" rx="1.5" fill="#34d399"/>
+              <rect id="dock-battery-bar" x="2" y="2" width="19" height="10" rx="1.5" fill="#10b981"/>
             </svg>
             <svg class="battery-bolt" id="dock-battery-bolt" viewBox="0 0 24 24" fill="currentColor">
               <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
             </svg>
           </div>
-          <span class="mono" id="dock-battery-val">100%</span>
+          <span class="mono" id="dock-battery-val" style="color:#334155; font-weight:600;">100%</span>
         </div>
 
         <div class="divider"></div>
 
         <!-- System Clock -->
         <div class="stat-item" title="Local System Clock">
-          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <polyline points="12 6 12 12 16 14"/>
           </svg>
-          <span class="mono" id="dock-clock-val" style="color:#cbd5e1;">--:--:--</span>
+          <span class="mono" id="dock-clock-val" style="color:#334155; font-weight:600;">--:--:--</span>
         </div>
 
         <div class="divider"></div>
@@ -789,20 +829,20 @@ function initializeSebBottomDock(): void {
     if (!root || !root.shadowRoot) return;
     const shadow = root.shadowRoot;
 
-    // Latency
+    // Latency / Clean WiFi Color (Green / Amber / Red)
     const wifiIcon = shadow.getElementById('dock-wifi-icon');
-    const latencyVal = shadow.getElementById('dock-latency-val');
-    if (wifiIcon && latencyVal) {
+    const wifiStat = shadow.getElementById('dock-wifi-stat');
+    if (wifiIcon) {
       const ms = currentLatency;
       if (ms === null) {
-        latencyVal.textContent = 'Offline';
         wifiIcon.className.baseVal = 'icon wifi-red';
-        latencyVal.className = 'mono wifi-red';
+        if (wifiStat) wifiStat.setAttribute('title', 'Network: Disconnected / Offline');
       } else {
-        latencyVal.textContent = `${ms} ms`;
-        const tier = ms < 150 ? 'wifi-green' : ms < 450 ? 'wifi-amber' : 'wifi-red';
+        const tier = ms < 400 ? 'wifi-green' : ms < 999 ? 'wifi-amber' : 'wifi-red';
         wifiIcon.className.baseVal = `icon ${tier}`;
-        latencyVal.className = `mono ${tier}`;
+        if (wifiStat) {
+          wifiStat.setAttribute('title', `Network: ${tier === 'wifi-green' ? 'Optimal' : tier === 'wifi-amber' ? 'Moderate' : 'High Latency'}`);
+        }
       }
     }
 
@@ -819,7 +859,7 @@ function initializeSebBottomDock(): void {
       batteryBar.setAttribute('width', String(Math.max(1, fillWidth)));
 
       // Color
-      const fillColor = pct > 20 ? '#34d399' : '#f87171';
+      const fillColor = pct > 20 ? '#10b981' : '#ef4444';
       batteryBar.setAttribute('fill', fillColor);
 
       if (currentIsCharging) {
