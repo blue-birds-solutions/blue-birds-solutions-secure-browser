@@ -135,6 +135,31 @@ const BLACKLIST: readonly string[] = [
   'ghidra',
   'scylla',
   'ollydbg',
+
+  // GPU Overlay & Screen Capture Tools (AMD Adrenalin, Nvidia ShadowPlay/GeForce Experience, Xbox Game Bar)
+  // These tools provide in-game browsers and screen capture that bypass exam restrictions.
+  'radeon software',
+  'radeon host service',
+  'amdrsserv',
+  'cncmd',                   // AMD Adrenalin command node
+  'radeonsoftware',
+  'amdow',                   // AMD Overlay Window
+  'nvcontainer',             // Nvidia Container / GeForce Experience host
+  'nvsphelper64',            // Nvidia ShadowPlay helper
+  'nvspcaps64',              // Nvidia Screen Capture
+  'nvdisplay.container',     // Nvidia Display Container
+  'gamebarftserver',         // Xbox Game Bar FT Server
+  'gamebarft',               // Xbox Game Bar
+  'xboxapp',                 // Xbox app
+  'gamingservices',          // Windows Gaming Services
+  'playnite',                // Playnite game launcher (browser tab)
+  'rivatuner',               // RivaTuner Statistics Server (overlay)
+  'rtss',                    // RivaTuner Statistics Server
+  'msiafterburner',          // MSI Afterburner (overlay)
+  'bandicam',                // Bandicam screen recorder
+  'fraps',                   // FRAPS screen recorder
+  'dxtory',                  // Dxtory screen recorder
+  'action',                  // Mirillis Action! screen recorder
 ];
 
 /** Virtual machine processes/drivers to detect virtualized environments. */
@@ -150,6 +175,7 @@ const VM_INDICATORS: readonly string[] = [
 
 /** Keyboard shortcuts to suppress at the OS level in production. */
 const BLOCKED_SHORTCUTS: readonly string[] = [
+  // Task-switching / OS navigation
   'Alt+Tab',
   'Alt+F4',
   'Alt+Escape',
@@ -160,6 +186,26 @@ const BLOCKED_SHORTCUTS: readonly string[] = [
   'Ctrl+Escape',
   'Ctrl+Shift+Escape',
   'Ctrl+Alt+Delete',
+  // Windows Snap & minimize (Win+Arrow, Win+D, Win+M)
+  'Super+Left',
+  'Super+Right',
+  'Super+Up',
+  'Super+Down',
+  'Super+D',
+  'Super+M',
+  'Super+Home',
+  // Xbox Game Bar (Win+G) & recording shortcuts
+  'Super+G',
+  'Super+Alt+R',
+  'Super+Alt+G',
+  'Super+Alt+Print',
+  // AMD Adrenalin ReLive / Nvidia ShadowPlay overlay
+  'Alt+R',
+  'Alt+Z',
+  'Ctrl+Shift+O',
+  // macOS Mission Control / Exposé
+  'Command+Mission_Control',
+  'Command+F3',
 ];
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -233,16 +279,26 @@ function restoreKioskLockout(): void {
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
 function createWindow(): void {
+  const isWin = process.platform === 'win32';
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
-    show: false,           // Start hidden to prevent white flash
-    backgroundColor: '#ffffff', // Clean white theme background
+    show: false,              // Start hidden to prevent white flash
+    backgroundColor: '#ffffff',
     fullscreen: !IS_DEV,
-    kiosk: !IS_DEV,        // Locks user into foreground, intercepts OS commands
+    kiosk: !IS_DEV,           // Locks user into foreground, intercepts OS commands
     alwaysOnTop: !IS_DEV,
     skipTaskbar: !IS_DEV && process.platform === 'darwin',
-    frame: IS_DEV,         // No title bar/frame in production
+    frame: IS_DEV,            // No title bar/frame in production
+    // ── HARDENING: prevent window resize / move / minimize / maximize ──────
+    // On Windows, students were using Win+Arrow snap, AMD Adrenalin overlay resize,
+    // and the taskbar to shrink the window and access the underlying desktop.
+    // These flags close that escape hatch entirely in production.
+    resizable: IS_DEV,
+    movable: IS_DEV,
+    minimizable: IS_DEV,
+    maximizable: IS_DEV,
+    // ────────────────────────────────────────────────────────────────────────
     icon: path.join(__dirname, '..', 'desktop_icon_256x256.ico'),
     webPreferences: {
       nodeIntegration: false,
@@ -252,6 +308,7 @@ function createWindow(): void {
       sandbox: true,
     },
   });
+  void isWin; // referenced above via process.platform check, kept for clarity
 
   // Anti-Screenshot / Screen Capture blocking.
   // setContentProtection(true) makes the window render as black in OS capture tools.
@@ -311,8 +368,50 @@ function createWindow(): void {
     sendHudStatusToRenderer();
   });
 
+  // ── HARDENING: Re-enforce kiosk/fullscreen if the OS ever pulls the window out ──
+  // On Windows, Alt+F4 / GPU overlay resize / Win+Arrow snapping can collapse the
+  // kiosk window. These guards detect that and immediately restore lockdown.
+  const enforceFullscreen = (): void => {
+    if (IS_DEV || isRequestingPermission || isConfirmingExit || !mainWindow || mainWindow.isDestroyed()) return;
+    console.warn('[SecureBrowser] Window left fullscreen unexpectedly — re-enforcing kiosk lockout.');
+    // Small delay so Windows can finish its animation before we push back
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (process.platform === 'win32') {
+        const primaryDisplay = screen.getPrimaryDisplay();
+        mainWindow.setBounds(primaryDisplay.bounds);
+      }
+      mainWindow.setKiosk(true);
+      mainWindow.setFullScreen(true);
+      mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+      mainWindow.moveTop();
+      mainWindow.focus();
+    }, 120);
+  };
+
+  mainWindow.on('leave-full-screen', enforceFullscreen);
+  mainWindow.on('unmaximize', enforceFullscreen);
+  mainWindow.on('restore', enforceFullscreen);
+  mainWindow.on('minimize', (): void => {
+    // Never allow the window to be minimised in production
+    if (!IS_DEV && !isRequestingPermission && !isConfirmingExit && mainWindow && !mainWindow.isDestroyed()) {
+      console.warn('[SecureBrowser] Minimise attempt intercepted — restoring.');
+      mainWindow.restore();
+      enforceFullscreen();
+    }
+  });
+
   mainWindow.on('resize', (): void => {
-    // Nothing needed for DOM-injected dock
+    // Re-pin to primary display bounds if a rogue resize shrinks the window
+    if (!IS_DEV && !isRequestingPermission && mainWindow && !mainWindow.isDestroyed() && process.platform === 'win32') {
+      const primaryDisplay = screen.getPrimaryDisplay();
+      const bounds = mainWindow.getBounds();
+      const pd = primaryDisplay.bounds;
+      if (bounds.width < pd.width || bounds.height < pd.height) {
+        console.warn('[SecureBrowser] Window resize below screen bounds detected — snapping back.');
+        mainWindow.setBounds(pd);
+      }
+    }
   });
 
   // Synchronize HUD on route navigations (re-inject if SPA navigated away)
@@ -2168,6 +2267,8 @@ ipcMain.on('exam-started', (): void => {
   // Clear permission-request mode and ensure full lockout is active when exam begins
   isRequestingPermission = false;
   restoreKioskLockout();
+  // Shortcuts are already registered from window launch (pre-flight hardening).
+  // Calling registerGlobalShortcuts() again is safe — it guards against double-registration.
   registerGlobalShortcuts();
   startProcessMonitor();
   startClipboardWiper();
