@@ -377,7 +377,7 @@ const secureBrowserAPI: SecureBrowserAPI = {
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke('get-app-version'),
 
-  appVersion: '1.2.1',
+  appVersion: '1.2.3',
 };
 
 contextBridge.exposeInMainWorld('secureBrowser', secureBrowserAPI);
@@ -395,7 +395,7 @@ function initializeSebBottomDock(): void {
   let currentLatency: number | null = typeof navigator !== 'undefined' && (navigator as any).onLine ? 24 : null;
   let currentBatteryPercent = 100;
   let currentIsCharging = false;
-  let currentAppVersion = 'v1.2.1';
+  let currentAppVersion = 'v1.2.3';
 
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const createDockDOM = (shadow: any) => {
@@ -690,7 +690,7 @@ function initializeSebBottomDock(): void {
         <div class="brand" title="Bluebirds Secure Browser">
           <span class="brand-badge">BB</span>
           <span class="brand-title">Secure</span>
-          <span class="version-tag" id="dock-version">v1.2.1</span>
+          <span class="version-tag" id="dock-version">v1.2.3</span>
         </div>
 
         <div class="divider"></div>

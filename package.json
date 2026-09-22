@@ -1,6 +1,6 @@
 {
   "name": "bluebirds-secure-browser",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Lockdown Browser Shell for Bluebirds Assessment Platform",
   "main": "dist/main.js",
   "scripts": {

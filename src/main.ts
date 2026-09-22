@@ -136,22 +136,19 @@ const BLACKLIST: readonly string[] = [
   'scylla',
   'ollydbg',
 
-  // GPU Overlay & Screen Capture Tools (AMD Adrenalin, Nvidia ShadowPlay/GeForce Experience, Xbox Game Bar)
-  // These tools provide in-game browsers and screen capture that bypass exam restrictions.
+  // GPU Overlay & Screen Capture Tools (AMD Adrenalin, Nvidia ShadowPlay, Xbox Game Bar)
+  // These tools provide in-game browsers and screen capture overlays.
+  // NOTE: Hardware driver services (nvdisplay.container, nvcontainer, gamingservices) must NOT be blacklisted as Windows auto-restarts them.
   'radeon software',
-  'radeon host service',
   'amdrsserv',
   'cncmd',                   // AMD Adrenalin command node
   'radeonsoftware',
   'amdow',                   // AMD Overlay Window
-  'nvcontainer',             // Nvidia Container / GeForce Experience host
-  'nvsphelper64',            // Nvidia ShadowPlay helper
+  'nvsphelper64',            // Nvidia ShadowPlay helper overlay
   'nvspcaps64',              // Nvidia Screen Capture
-  'nvdisplay.container',     // Nvidia Display Container
   'gamebarftserver',         // Xbox Game Bar FT Server
   'gamebarft',               // Xbox Game Bar
   'xboxapp',                 // Xbox app
-  'gamingservices',          // Windows Gaming Services
   'playnite',                // Playnite game launcher (browser tab)
   'rivatuner',               // RivaTuner Statistics Server (overlay)
   'rtss',                    // RivaTuner Statistics Server
@@ -920,7 +917,7 @@ function pingTarget(targetUrl: string): Promise<number | null> {
           method: 'HEAD',
           agent: isHttps ? pingAgent : undefined,
           headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) BluebirdsSecureApp/1.2.1 Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) BluebirdsSecureApp/1.2.3 Chrome/120.0.0.0 Safari/537.36',
             'Cache-Control': 'no-cache',
             'Accept': '*/*',
           },
@@ -1325,6 +1322,12 @@ function isSystemDaemon(proc: string): boolean {
     'bird',                      // Apple iCloud Documents daemon
     'identityservicesd',         // Apple IDS daemon
     'rapportd',                  // Apple device communication daemon
+    'nvdisplay.container',       // Nvidia Display Driver service
+    'nvcontainer',               // Nvidia Container service
+    'gamingservices',            // Windows Gaming Services
+    'gamingservicenet',          // Windows Gaming Services Net
+    'amdrsserv',                 // AMD Radeon service
+    'radeonhostservice',         // AMD Radeon host service
   ];
 
   const basename = (p.includes('/') ? p.split('/').pop()! : p).toLowerCase();
@@ -1657,8 +1660,8 @@ function killProcess(name: string, isWindows: boolean): Promise<void> {
     let cmd: string;
     if (isWindows) {
       const cleanName = name.replace(/\.exe$/i, '');
-      // Force kill entire process tree (/T) for both cleanName.exe and bare image name
-      cmd = `taskkill /F /T /IM "${cleanName}.exe" 2>nul & taskkill /F /T /IM "${cleanName}" 2>nul`;
+      // Force kill entire process tree (/T), bare image name, and PowerShell wildcard for UWP apps (e.g. WhatsApp)
+      cmd = `taskkill /F /T /IM "${cleanName}.exe" 2>nul & taskkill /F /T /IM "${cleanName}" 2>nul & powershell -NoProfile -NonInteractive -Command "Get-Process -Name '*${cleanName}*' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" 2>nul`;
     } else {
       cmd = `pkill -9 -i -x "${name}" 2>/dev/null || pkill -9 -i -f "${name}.app" 2>/dev/null`;
     }
