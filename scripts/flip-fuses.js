@@ -29,14 +29,14 @@ module.exports = async function (context) {
       [FuseV1Options.EnableCookieEncryption]: true,
       [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
       [FuseV1Options.EnableNodeCliInspectArguments]: false,
-      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
-      [FuseV1Options.OnlyLoadAppFromAsar]: true,
+      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: false,
+      [FuseV1Options.OnlyLoadAppFromAsar]: false,
       resetAdHocDarwinSignature: electronPlatformName === 'darwin' && arch === 3,
     });
 
-    console.log('[Fuses] ✓ Anti-debugging, anti-injection & ASAR integrity fuses permanently locked in executable!');
+    console.log('[Fuses] ✓ Anti-debugging, anti-injection & security fuses permanently locked in executable!');
   } catch (err) {
-    console.error('[Fuses] Failed to flip fuses:', err);
-    // Do not throw to avoid failing unsupported build targets, but log loudly
+    console.warn('[Fuses] Warning: Non-fatal fuse flipping error:', err.message || err);
   }
 };
+

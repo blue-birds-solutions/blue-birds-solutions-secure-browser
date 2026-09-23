@@ -526,7 +526,14 @@
   </div>
 
   <script>
-    const { ipcRenderer } = require('electron');
+    let ipcRenderer;
+    try {
+      if (typeof require === 'function') {
+        ipcRenderer = require('electron').ipcRenderer;
+      }
+    } catch (err) {
+      console.warn('[ProhibitedModal] Direct node require unavailable:', err);
+    }
 
     // -- Version --
     const version = window.location.hash.substring(1) || '';
@@ -577,38 +584,42 @@
     }
 
     // -- Load initial process list --
-    ipcRenderer.on('init-processes', (_e, data) => {
-      renderProcesses(data.forbiddenApps || []);
-    });
+    if (ipcRenderer) {
+      ipcRenderer.on('init-processes', (_e, data) => {
+        renderProcesses(data.forbiddenApps || []);
+      });
+    }
 
     // -- Auto-Close button --
     document.getElementById('btn-auto-close').addEventListener('click', () => {
       setLoading(true);
-      ipcRenderer.send('prohibited-modal-auto-close');
+      if (ipcRenderer) ipcRenderer.send('prohibited-modal-auto-close');
     });
 
     // -- Re-Check button --
     document.getElementById('btn-recheck').addEventListener('click', () => {
       setLoading(true);
-      ipcRenderer.send('prohibited-modal-recheck');
+      if (ipcRenderer) ipcRenderer.send('prohibited-modal-recheck');
     });
 
     // -- Quit button --
     document.getElementById('btn-quit').addEventListener('click', () => {
-      ipcRenderer.send('prohibited-modal-quit');
+      if (ipcRenderer) ipcRenderer.send('prohibited-modal-quit');
     });
 
     // -- Result from main process --
-    ipcRenderer.on('check-result', (_e, data) => {
-      setLoading(false);
-      if (data.clean) {
-        document.getElementById('status-dot').classList.add('ok');
-        document.getElementById('footer-status-text').textContent = 'System Clean — Launching...';
-        showSuccess();
-      } else {
-        renderProcesses(data.forbiddenApps || []);
-      }
-    });
+    if (ipcRenderer) {
+      ipcRenderer.on('check-result', (_e, data) => {
+        setLoading(false);
+        if (data.clean) {
+          document.getElementById('status-dot').classList.add('ok');
+          document.getElementById('footer-status-text').textContent = 'System Clean — Launching...';
+          showSuccess();
+        } else {
+          renderProcesses(data.forbiddenApps || []);
+        }
+      });
+    }
   </script>
 </body>
 </html>

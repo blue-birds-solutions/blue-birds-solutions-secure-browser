@@ -298,7 +298,7 @@
     <!-- Header -->
     <div class="header">
       <div class="brand-group">
-        <img class="logo-img" src="./desktop_icon.png" alt="Bluebirds Secure Browser" />
+        <img class="logo-img" src="../desktop_icon.png" onerror="this.onerror=null; this.src='./desktop_icon.png';" alt="Bluebirds Secure Browser" />
         <div class="brand-titles">
           <div class="brand-title">Bluebirds Solutions</div>
           <div class="brand-subtitle">Secure Exam Browser <span id="current-version-label"></span></div>
@@ -366,14 +366,24 @@
       versionLabel.textContent = 'v' + version;
     }
 
+    let ipcRenderer;
+    try {
+      if (typeof require === 'function') {
+        ipcRenderer = require('electron').ipcRenderer;
+      }
+    } catch (err) {
+      console.warn('[Splash] Direct node require unavailable:', err);
+    }
+
     const badgeEl = document.getElementById('status-badge');
     const badgeTextEl = document.getElementById('badge-text');
     const splashExitBtn = document.getElementById('splash-exit-btn');
     if (splashExitBtn) {
       splashExitBtn.addEventListener('click', () => {
         try {
-          const { ipcRenderer } = require('electron');
-          ipcRenderer.send('splash-cancel-exit');
+          if (ipcRenderer) {
+            ipcRenderer.send('splash-cancel-exit');
+          }
         } catch (err) {
           console.error('[Splash] Failed to send splash-cancel-exit', err);
         }

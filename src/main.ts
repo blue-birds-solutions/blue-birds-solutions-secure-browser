@@ -21,6 +21,15 @@ import http from 'http';
 import https from 'https';
 import { autoUpdater } from 'electron-updater';
 
+// ─── Global Uncaught Exception Handlers ─────────────────────────────────────
+process.on('uncaughtException', (error) => {
+  console.error('[SecureBrowser] Uncaught exception in main process:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[SecureBrowser] Unhandled rejection in main process:', reason);
+});
+
 // ─── Type Definitions ────────────────────────────────────────────────────────
 
 interface SecurityStatus {
@@ -285,7 +294,7 @@ function createWindow(): void {
     fullscreen: !IS_DEV,
     kiosk: !IS_DEV,           // Locks user into foreground, intercepts OS commands
     alwaysOnTop: !IS_DEV,
-    skipTaskbar: !IS_DEV && process.platform === 'darwin',
+    skipTaskbar: !IS_DEV,                 // Hide from taskbar on ALL platforms in production
     frame: IS_DEV,            // No title bar/frame in production
     // ── HARDENING: prevent window resize / move / minimize / maximize ──────
     // On Windows, students were using Win+Arrow snap, AMD Adrenalin overlay resize,
@@ -339,12 +348,23 @@ function createWindow(): void {
   mainWindow.once('ready-to-show', (): void => {
     if (mainWindow) {
       if (process.platform === 'win32') {
+        // Snap to primary display bounds BEFORE showing to eliminate any gap
+        // that would allow the taskbar to remain visible.
         const primaryDisplay = screen.getPrimaryDisplay();
         mainWindow.setBounds(primaryDisplay.bounds);
       }
       mainWindow.show();
       if (!IS_DEV) {
+        // Re-apply kiosk + fullscreen + topmost Z-order after show() so that
+        // the Windows DWM has no chance to place the taskbar above the window.
+        if (process.platform === 'win32') {
+          const pd = screen.getPrimaryDisplay();
+          mainWindow.setBounds(pd.bounds);
+          mainWindow.setKiosk(true);
+          mainWindow.setFullScreen(true);
+        }
         mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+        mainWindow.moveTop();
         mainWindow.focus();
         bringAppToFront();
       }
@@ -557,14 +577,33 @@ function createSplashWindow(): void {
     splashWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
 
-  const splashPath = path.join(__dirname, '..', 'src', 'splash.html');
-  splashWindow.loadFile(splashPath, { hash: app.getVersion() });
+  const possibleSplashPaths = [
+    path.join(__dirname, '..', 'src', 'splash.html'),
+    path.join(__dirname, 'src', 'splash.html'),
+    path.join(process.resourcesPath, 'app.asar', 'src', 'splash.html'),
+    path.join(process.resourcesPath, 'src', 'splash.html'),
+  ];
+  let splashPath = possibleSplashPaths[0];
+  for (const p of possibleSplashPaths) {
+    if (fs.existsSync(p)) {
+      splashPath = p;
+      break;
+    }
+  }
+
+  splashWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+    console.error('[SecureBrowser] splash.html failed to load:', code, desc, 'path was:', splashPath);
+  });
+
+  splashWindow.loadFile(splashPath, { hash: app.getVersion() }).catch((err) => {
+    console.error('[SecureBrowser] Failed to load splash.html:', err);
+  });
 
   splashWindow.on('closed', (): void => {
     splashWindow = null;
   });
 
-  console.log('[SecureBrowser] Splash window created.');
+  console.log('[SecureBrowser] Splash window created at:', splashPath);
 }
 
 export interface UpdateStatusPayload {
@@ -794,9 +833,25 @@ function showProhibitedModalGate(initialForbiddenApps: string[]): Promise<boolea
       } catch {}
     }, 1200);
 
+    // NOTE: We intentionally do NOT attach a 'closed' listener here that calls
+    // finalize(false). The window can be closed by finalize(true) completing its
+    // own success path (auto-close / watchdog), and a competing `closed → finalize(false)`
+    // listener would race with it and incorrectly quit the app after a clean startup.
+    //
+    // The only times finalize(false) should fire are:
+    //   1. handleQuit: user explicitly clicks "Quit" in the modal.
+    //   2. The outer checkAndCleanSystem caller gets false back and calls app.quit().
+    //
+    // If the window gets destroyed by an external actor (e.g. OS), we treat it as
+    // a safe no-op and let the startup sequence continue — the subsequent system
+    // check will catch any remaining violations.
     if (prohibitedWindow) {
       prohibitedWindow.on('closed', () => {
-        finalize(false);
+        // Only call finalize(false) if the gate was NOT already resolved to true.
+        // This guards against the OS destroying the window after a successful clear.
+        if (!isResolved) {
+          finalize(false);
+        }
       });
     }
   });
@@ -1117,13 +1172,30 @@ function stopWindowsKeyboardLock(): void {
     () => {}
   );
 
-  // 2. Kill keyboard lock child process
+  // 2. Force-kill keyboard lock child and its entire process tree.
+  //    Node's child.kill() only sends SIGTERM to the immediate handle — the
+  //    underlying powershell.exe tree survives and keeps the single-instance
+  //    mutex locked, preventing the app from reopening after a quit.
+  //    taskkill /F /T kills the root PID and every child it spawned.
   if (keyboardLockChild) {
+    const pid = keyboardLockChild.pid;
     try {
       keyboardLockChild.kill();
     } catch {}
     keyboardLockChild = null;
+
+    if (pid !== undefined) {
+      // /T = include child processes, /F = force, 2>nul = suppress errors
+      exec(`taskkill /F /T /PID ${pid} 2>nul`, () => {});
+    }
   }
+
+  // 3. Belt-and-suspenders: kill any lingering powershell processes that were
+  //    spawned by the keyboard-lock script (identified by the BB_POLICY env marker).
+  exec(
+    'powershell -NoProfile -NonInteractive -Command "Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like \'*keyboard-lock*\' -or $_.CommandLine -like \'*bb-keyboard-lock*\' } | Stop-Process -Force -ErrorAction SilentlyContinue" 2>nul',
+    () => {}
+  );
 }
 
 // ─── Emergency Exit Shortcut ─────────────────────────────────────────────────
@@ -1166,8 +1238,19 @@ function performCleanExit(): void {
   try { if (hudMonitorInterval) { clearInterval(hudMonitorInterval); hudMonitorInterval = null; } } catch {}
   try { stopProcessMonitor(); } catch {}
   try { stopClipboardWiper(); } catch {}
+  // Kill the keyboard-lock PowerShell process tree BEFORE exiting so that the
+  // single-instance mutex is released and the app can reopen immediately.
   try { stopWindowsKeyboardLock(); } catch {}
   try { globalShortcut.unregisterAll(); } catch {}
+  // Always clear the crash-recovery session file on a clean exit so that the
+  // next launch does NOT incorrectly enter crash-recovery mode.
+  try { clearActiveSessionState(); } catch {}
+  // Reset runtime state so a hypothetical in-process restart would not reuse stale values
+  activeAttemptId = null;
+  activeAssessmentId = null;
+  activeToken = null;
+  isInitialized = false;
+  wasOpenedViaDeepLink = false;
   try {
     for (const win of secondaryBlackoutWindows) {
       if (!win.isDestroyed()) win.destroy();
@@ -1660,8 +1743,9 @@ function killProcess(name: string, isWindows: boolean): Promise<void> {
     let cmd: string;
     if (isWindows) {
       const cleanName = name.replace(/\.exe$/i, '');
-      // Force kill entire process tree (/T), bare image name, and PowerShell wildcard for UWP apps (e.g. WhatsApp)
-      cmd = `taskkill /F /T /IM "${cleanName}.exe" 2>nul & taskkill /F /T /IM "${cleanName}" 2>nul & powershell -NoProfile -NonInteractive -Command "Get-Process -Name '*${cleanName}*' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue" 2>nul`;
+      // Kill by exact image name WITHOUT /T so child processes (like BluebirdsSecureBrowser spawned from Chrome protocol) are never killed.
+      // Filter PowerShell termination to ensure the current process PID and secure browser binaries are never terminated.
+      cmd = `taskkill /F /IM "${cleanName}.exe" 2>nul & taskkill /F /IM "${cleanName}" 2>nul & powershell -NoProfile -NonInteractive -Command "Get-Process -Name '*${cleanName}*' -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne ${process.pid} -and $_.ProcessName -notmatch 'bluebird|securebrowser|electron' } | Stop-Process -Force -ErrorAction SilentlyContinue" 2>nul`;
     } else {
       cmd = `pkill -9 -i -x "${name}" 2>/dev/null || pkill -9 -i -f "${name}.app" 2>/dev/null`;
     }
@@ -1721,42 +1805,84 @@ function bringAppToFront(): void {
  *
  * CRITICAL: This function resolves within MAX_KILL_TIMEOUT_MS regardless of
  * system responsiveness — it must never block the splash screen indefinitely.
+ *
+ * After issuing kill commands, this function polls for up to SETTLE_TIMEOUT_MS
+ * to wait for browser processes to fully exit.
+ *
+ * SAFETY GUARANTEE: Never uses /T (tree-kill) when terminating browsers, because
+ * when the app is launched via custom protocol (bluebirds-sb://) from Chrome or Edge,
+ * BluebirdsSecureBrowser.exe is in the browser's process tree. A tree-kill would
+ * kill BluebirdsSecureBrowser itself!
  */
 function closeAllOtherGUIApps(): Promise<void> {
-  const MAX_KILL_TIMEOUT_MS = 5_000;
+  const MAX_KILL_TIMEOUT_MS = 8_000;
+  const SETTLE_POLL_INTERVAL = 300;   // ms between settle checks
+  const SETTLE_MAX_POLLS = 6;          // max ~1.8 s of settle polling
 
   return new Promise<void>((resolve) => {
-    // Hard timeout: no matter what, we move on after MAX_KILL_TIMEOUT_MS
+    let settled = false;
     const timeoutHandle = setTimeout(() => {
-      console.warn('[SecureBrowser] closeAllOtherGUIApps: hit hard timeout, continuing startup.');
-      resolve();
+      if (!settled) {
+        settled = true;
+        console.warn('[SecureBrowser] closeAllOtherGUIApps: hit hard timeout, continuing startup.');
+        resolve();
+      }
     }, MAX_KILL_TIMEOUT_MS);
 
     const done = (): void => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeoutHandle);
       resolve();
     };
 
-    if (process.platform === 'win32') {
-      // In-memory PowerShell process pipeline termination (SEB Windows ApplicationMonitor equivalent)
-      const psScript = `
-        $ownId = [System.Diagnostics.Process]::GetCurrentProcess().Id;
-        Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.Id -ne $ownId } | ForEach-Object {
-          $name = $_.ProcessName.ToLower();
-          if ($name -notmatch 'explorer|bluebirds|electron|shellexperiencehost|searchhost|startmenuexperiencehost') {
-            try {
-              Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue;
-            } catch {}
-          }
-        }
-      `.replace(/\s+/g, ' ').trim();
+    // Helper: wait for known browser executable names to fully disappear
+    const waitForSettle = (isWindows: boolean): void => {
+      const browserResiduals = isWindows
+        ? ['chrome.exe', 'msedge.exe', 'brave.exe', 'firefox.exe', 'opera.exe', 'vivaldi.exe']
+        : ['Google Chrome', 'Brave Browser', 'Microsoft Edge', 'firefox'];
 
-      exec(
-        `powershell -NonInteractive -WindowStyle Hidden -Command "${psScript}"`,
-        () => done()
-      );
+      let polls = 0;
+      const poll = (): void => {
+        polls++;
+        if (polls > SETTLE_MAX_POLLS) {
+          console.log('[SecureBrowser] closeAllOtherGUIApps: settle timeout reached, proceeding.');
+          done();
+          return;
+        }
+
+        const checkCmd = isWindows
+          ? `tasklist /FI "STATUS eq RUNNING" /NH /FO CSV 2>nul`
+          : `ps -axo comm 2>/dev/null`;
+
+        exec(checkCmd, (err, stdout) => {
+          if (err || !stdout) { done(); return; }
+          const lower = stdout.toLowerCase();
+          const anyRunning = browserResiduals.some((n) => lower.includes(n.toLowerCase()));
+          if (!anyRunning) {
+            console.log(`[SecureBrowser] closeAllOtherGUIApps: all residual processes exited after ${polls} poll(s).`);
+            done();
+          } else {
+            setTimeout(poll, SETTLE_POLL_INTERVAL);
+          }
+        });
+      };
+
+      // Start polling after a brief initial delay to give kill signals time to propagate
+      setTimeout(poll, 250);
+    };
+
+    if (process.platform === 'win32') {
+      const winKillTargets = [
+        'chrome', 'msedge', 'brave', 'firefox', 'opera', 'vivaldi', 'arc',
+        'discord', 'zoom', 'skype', 'teams', 'slack', 'teamviewer', 'anydesk',
+        'obs', 'obs64', 'snippingtool', 'whatsapp', 'telegram', 'vncviewer',
+        'parsec', 'ultraviewer', 'rustdesk', 'ammyy', 'cheatengine', 'wireshark'
+      ];
+      // CRITICAL: Use /IM without /T so child processes with distinct names (like BluebirdsSecureBrowser.exe) are never killed
+      const filterCmd = winKillTargets.map((t) => `taskkill /F /IM "${t}.exe" 2>nul & taskkill /F /IM "${t}" 2>nul`).join(' & ');
+      exec(filterCmd, () => waitForSettle(true));
     } else if (process.platform === 'darwin') {
-      // Fire all pkill calls in parallel — no blocking osascript calls
       const killTargets = [
         'Google Chrome', 'Google Chrome Helper', 'Google Chrome Helper (Renderer)',
         'Brave Browser', 'Brave Browser Helper', 'Brave Browser Helper (Renderer)',
@@ -1768,7 +1894,7 @@ function closeAllOtherGUIApps(): Promise<void> {
       let pending = killTargets.length;
       const check = (): void => {
         pending--;
-        if (pending <= 0) done();
+        if (pending <= 0) waitForSettle(false);
       };
 
       killTargets.forEach((proc) => {
@@ -2264,6 +2390,37 @@ ipcMain.on('splash-cancel-exit', (): void => {
   performCleanExit();
 });
 
+// ─── Fullscreen Verify & Enforce IPC ─────────────────────────────────────────
+// Called by the preload HUD "Fullscreen" button. If the window has escaped kiosk
+// (e.g. Windows taskbar interaction or a GPU overlay resize), this forcibly
+// re-applies all kiosk/fullscreen/alwaysOnTop constraints.
+ipcMain.handle('verify-fullscreen', (): { isFullScreen: boolean; isKiosk: boolean; wasEnforced: boolean } => {
+  if (!mainWindow || mainWindow.isDestroyed() || IS_DEV) {
+    return { isFullScreen: true, isKiosk: true, wasEnforced: false };
+  }
+
+  const isFullScreen = mainWindow.isFullScreen();
+  const isKiosk = mainWindow.isKiosk();
+  const wasEnforced = !isFullScreen || !isKiosk;
+
+  if (wasEnforced) {
+    console.warn('[SecureBrowser] verify-fullscreen: window escaped kiosk/fullscreen — re-enforcing.');
+    if (process.platform === 'win32') {
+      const pd = screen.getPrimaryDisplay();
+      mainWindow.setBounds(pd.bounds);
+    }
+    mainWindow.setKiosk(true);
+    mainWindow.setFullScreen(true);
+    mainWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+    mainWindow.moveTop();
+    mainWindow.focus();
+  } else {
+    console.log('[SecureBrowser] verify-fullscreen: window is correctly in fullscreen kiosk mode.');
+  }
+
+  return { isFullScreen: true, isKiosk: true, wasEnforced };
+});
+
 ipcMain.on('exam-started', (): void => {
   console.log('[SecureBrowser] Exam started. Activating security lockout, shortcuts & process monitoring.');
   isExamActive = true;
@@ -2476,11 +2633,12 @@ function restoreActiveSessionState(): boolean {
 }
 
 function handleDeepLink(urlStr: string): void {
-  console.log(`[SecureBrowser] Deep link received: ${urlStr}`);
+  const cleanUrl = urlStr.replace(/^["']|["']$/g, '').trim();
+  console.log(`[SecureBrowser] Deep link received: ${cleanUrl}`);
   wasOpenedViaDeepLink = true;
 
   try {
-    const parsedUrl = new URL(urlStr);
+    const parsedUrl = new URL(cleanUrl);
     const attemptId = parsedUrl.searchParams.get('attemptId');
     const assessmentId = parsedUrl.searchParams.get('assessmentId');
     const token = parsedUrl.searchParams.get('token');
@@ -2506,45 +2664,83 @@ function handleDeepLink(urlStr: string): void {
     return;
   }
 
-  // Already initialized — verify system is clean first, then navigate the live window
-  if (mainWindow) {
-    (async () => {
-      const clean = await checkAndCleanSystem(mainWindow);
-      if (!clean) {
-        console.log('[SecureBrowser] Startup gate rejected deep link navigation because system was not clean.');
-        return;
-      }
-
-      const origin =
-        process.env.APP_URL ??
-        (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
-
-      const targetId = activeAttemptId || activeAssessmentId;
-      if (targetId) {
-        let systemCheckUrl = `${origin}/system-check/${targetId}`;
-        if (activeToken) {
-          systemCheckUrl += `?token=${encodeURIComponent(activeToken)}`;
+  // Already initialized — if the main window was destroyed (e.g. user quit from
+  // tray after exam) but the process is still alive, recreate it so that the
+  // deep link can be honoured instead of being silently dropped.
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    console.log('[SecureBrowser] Deep link received but mainWindow is null/destroyed — recreating window.');
+    createWindow();
+    // Give the window a moment to finish loading, then navigate it.
+    // The window's 'ready-to-show' / 'did-finish-load' will not pick up the
+    // deep-link credentials automatically, so we schedule navigation after a
+    // short delay to let the renderer mount before we push a URL.
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        const origin =
+          process.env.APP_URL ??
+          (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
+        const targetId = activeAttemptId || activeAssessmentId;
+        if (targetId) {
+          let systemCheckUrl = `${origin}/system-check/${targetId}`;
+          if (activeToken) {
+            systemCheckUrl += `?token=${encodeURIComponent(activeToken)}`;
+          }
+          console.log(`[SecureBrowser] (deferred) Navigating recreated window to system check: ${systemCheckUrl}`);
+          if (activeToken) {
+            mainWindow.webContents
+              .executeJavaScript(
+                `try { localStorage.setItem('accessToken', '${activeToken}'); sessionStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
+              )
+              .catch(() => {});
+          }
+          mainWindow.loadURL(systemCheckUrl);
         }
-        console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
-
-        if (activeToken) {
-          mainWindow.webContents
-            .executeJavaScript(
-              `try { localStorage.setItem('accessToken', '${activeToken}'); sessionStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
-            )
-            .catch(() => {});
-        }
-        mainWindow.loadURL(systemCheckUrl);
+        mainWindow.show();
+        mainWindow.setAlwaysOnTop(true, 'screen-saver');
+        mainWindow.focus();
+        bringAppToFront();
       }
-
-      // Bring to foreground
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.setAlwaysOnTop(true, 'screen-saver');
-      mainWindow.focus();
-      bringAppToFront();
-    })();
+    }, 1200);
+    return;
   }
+
+  // Already initialized AND mainWindow exists — verify system is clean first, then navigate the live window
+  (async () => {
+    const clean = await checkAndCleanSystem(mainWindow);
+    if (!clean) {
+      console.log('[SecureBrowser] Startup gate rejected deep link navigation because system was not clean.');
+      return;
+    }
+
+    const origin =
+      process.env.APP_URL ??
+      (IS_DEV ? 'http://localhost:5173' : 'https://tests.bluebirdstraining.com');
+
+    const targetId = activeAttemptId || activeAssessmentId;
+    if (targetId) {
+      let systemCheckUrl = `${origin}/system-check/${targetId}`;
+      if (activeToken) {
+        systemCheckUrl += `?token=${encodeURIComponent(activeToken)}`;
+      }
+      console.log(`[SecureBrowser] Navigating live window to system check: ${systemCheckUrl}`);
+
+      if (activeToken) {
+        mainWindow.webContents
+          .executeJavaScript(
+            `try { localStorage.setItem('accessToken', '${activeToken}'); sessionStorage.setItem('accessToken', '${activeToken}'); } catch(e) {}`
+          )
+          .catch(() => {});
+      }
+      mainWindow.loadURL(systemCheckUrl);
+    }
+
+    // Bring to foreground
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.setAlwaysOnTop(true, 'screen-saver');
+    mainWindow.focus();
+    bringAppToFront();
+  })();
 }
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -2555,7 +2751,7 @@ if (!gotTheLock) {
 } else {
   app.on('second-instance', (event, commandLine): void => {
     // Parse deep link URL from the new instance's command line
-    const url = commandLine.find((arg) => arg.startsWith('bluebirds-sb://'));
+    const url = commandLine.find((arg) => arg.toLowerCase().includes('bluebirds-sb://'));
     if (url) {
       handleDeepLink(url);
     }
@@ -2595,7 +2791,7 @@ if (!gotTheLock) {
 
     // Check if launched via deep link (Windows/Linux)
     const deepLinkArg = process.argv.find((arg): boolean =>
-      arg.startsWith('bluebirds-sb://')
+      arg.toLowerCase().includes('bluebirds-sb://')
     );
 
     if (deepLinkArg) {
@@ -2613,28 +2809,28 @@ if (!gotTheLock) {
             return;
           }
 
-          const buttons = IS_DEV
-            ? ['Quit Secure Browser', 'Bypass (Dev Mode Only)']
-            : ['Quit Secure Browser'];
+          if (IS_DEV) {
+            console.log('[SecureBrowser] Direct launch in DEV mode — opening default portal.');
+            initializeApp();
+            return;
+          }
 
           bringAppToFront();
 
           const choice = showModalDialog(null, {
-            type: 'warning',
-            title: 'Launch via Student Portal Required',
+            type: 'info',
+            title: 'Bluebirds Secure Browser',
             message:
-              'This secure exam browser must be launched from your student dashboard.\n\nPlease log in to the portal and click "Start Test" to begin.',
-            buttons: buttons,
+              'Bluebirds Secure Browser is installed and operational.\n\nTo start an examination, please log in to your student dashboard in your browser and click "Start Test". The secure browser will automatically open and launch your session.',
+            buttons: ['Open Student Portal', 'Quit Secure Browser'],
             defaultId: 0,
+            cancelId: 1,
           });
 
-          if (!IS_DEV || choice === 0) {
-            console.log('[SecureBrowser] Direct launch detected. Quitting.');
-            app.quit();
-          } else {
-            console.log('[SecureBrowser] Direct launch warning bypassed in DEV mode.');
-            initializeApp();
+          if (choice === 0) {
+            shell.openExternal('https://tests.bluebirdstraining.com');
           }
+          app.quit();
         }
       }, 800);
     }
@@ -2749,6 +2945,12 @@ app.on('will-quit', (): void => {
   unregisterGlobalShortcuts();
   stopProcessMonitor();
   stopClipboardWiper();
+  // Ensure the PowerShell keyboard-lock process tree is dead before the process
+  // exits. This is the safety-net for all normal quit paths (window-all-closed
+  // → app.quit()) that do NOT go through performCleanExit().
+  stopWindowsKeyboardLock();
+  // Always remove the crash-recovery file on a clean exit.
+  try { clearActiveSessionState(); } catch {}
   if (wifiMonitorInterval !== null) {
     clearInterval(wifiMonitorInterval);
     wifiMonitorInterval = null;

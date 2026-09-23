@@ -7,17 +7,14 @@ const DIST_DIR = path.join(__dirname, '..', 'dist');
 const OBFUSCATOR_OPTIONS = {
   target: 'node',
   compact: true,
-  controlFlowFlattening: true,
-  controlFlowFlatteningThreshold: 0.75,
-  deadCodeInjection: true,
-  deadCodeInjectionThreshold: 0.3,
+  controlFlowFlattening: false,
+  deadCodeInjection: false,
   stringArray: true,
-  stringArrayEncoding: ['base64'],
-  stringArrayThreshold: 0.8,
-  transformObjectKeys: true,
-  numbersToExpressions: true,
-  splitStrings: true,
-  splitStringsChunkLength: 6,
+  stringArrayEncoding: ['none'],
+  stringArrayThreshold: 0.75,
+  transformObjectKeys: false, // Must be false so Electron C++ & API properties (e.g. app.commandLine) are not mangled
+  numbersToExpressions: false,
+  splitStrings: false,
   renameGlobals: false,
   selfDefending: false, // Set false to ensure compatibility with Electron IPC hooks
   disableConsoleOutput: false, // Keep stdout intact for critical security logs

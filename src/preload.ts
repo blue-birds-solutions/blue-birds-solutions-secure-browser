@@ -233,6 +233,9 @@ interface SecureBrowserAPI {
   /** Re-enforces native OS fullscreen and kiosk constraints. */
   restoreFullscreen: () => void;
 
+  /** Verifies and re-enforces fullscreen/kiosk mode. Returns status and whether enforcement was needed. */
+  verifyFullscreen: () => Promise<{ isFullScreen: boolean; isKiosk: boolean; wasEnforced: boolean }>;
+
   /** Synchronize active exam countdown timer string (e.g. "59:26") to the native top HUD. */
   syncExamTimer: (timerText: string) => void;
 
@@ -372,6 +375,10 @@ const secureBrowserAPI: SecureBrowserAPI = {
   restoreFullscreen: (): void => {
     ipcRenderer.send('restore-fullscreen');
   },
+
+  // Verify and re-enforce kiosk/fullscreen from the HUD button
+  verifyFullscreen: (): Promise<{ isFullScreen: boolean; isKiosk: boolean; wasEnforced: boolean }> =>
+    ipcRenderer.invoke('verify-fullscreen'),
 
   // Returns app version
   getAppVersion: (): Promise<string> =>
@@ -571,6 +578,85 @@ function initializeSebBottomDock(): void {
           height: 12px;
         }
 
+        /* Fullscreen Check Button */
+        .fs-btn {
+          all: unset;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          background: #f0f9ff;
+          border: 1px solid rgba(59, 130, 246, 0.4);
+          color: #2563eb;
+          padding: 3px 8px;
+          border-radius: 9999px;
+          font-size: 10.5px;
+          font-weight: 700;
+          transition: all 0.15s ease;
+          position: relative;
+        }
+
+        .fs-btn:hover {
+          background: #2563eb;
+          border-color: #3b82f6;
+          color: #ffffff;
+          box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+        }
+
+        .fs-btn:active {
+          transform: scale(0.96);
+        }
+
+        .fs-btn svg {
+          width: 12px;
+          height: 12px;
+        }
+
+        .fs-btn.enforcing {
+          background: #fef3c7;
+          border-color: rgba(245, 158, 11, 0.5);
+          color: #92400e;
+          cursor: wait;
+        }
+
+        .fs-btn.ok-flash {
+          background: #d1fae5;
+          border-color: rgba(16, 185, 129, 0.5);
+          color: #065f46;
+        }
+
+        /* Tooltip for fullscreen feedback */
+        .fs-tooltip {
+          display: none;
+          position: absolute;
+          bottom: calc(100% + 6px);
+          left: 50%;
+          transform: translateX(-50%);
+          white-space: nowrap;
+          background: #0f172a;
+          color: #ffffff;
+          font-size: 10px;
+          font-weight: 600;
+          padding: 4px 9px;
+          border-radius: 6px;
+          pointer-events: none;
+          z-index: 2147483647;
+        }
+
+        .fs-tooltip::after {
+          content: '';
+          position: absolute;
+          top: 100%;
+          left: 50%;
+          transform: translateX(-50%);
+          border: 4px solid transparent;
+          border-top-color: #0f172a;
+        }
+
+        .fs-tooltip.visible {
+          display: block;
+        }
+
         /* In-App Confirmation Modal (Zero Focus-Loss, Zero Tab-Switch Violations, Clean White Theme) */
         .modal-overlay {
           pointer-events: auto;
@@ -747,6 +833,20 @@ function initializeSebBottomDock(): void {
 
         <div class="divider"></div>
 
+        <!-- Fullscreen Check Button -->
+        <button class="fs-btn" id="dock-fs-btn" title="Verify & enforce fullscreen kiosk mode">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
+            <path d="M21 8V5a2 2 0 0 0-2-2h-3"/>
+            <path d="M3 16v3a2 2 0 0 0 2 2h3"/>
+            <path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+          </svg>
+          <span>Fullscreen</span>
+          <span class="fs-tooltip" id="dock-fs-tooltip"></span>
+        </button>
+
+        <div class="divider"></div>
+
         <!-- Exit Button -->
         <button class="exit-btn" id="dock-exit-btn" title="Exit Bluebirds Secure Browser">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
@@ -793,6 +893,48 @@ function initializeSebBottomDock(): void {
     };
     updateClock();
     setInterval(updateClock, 1000);
+
+    // Fullscreen Check Button Handler
+    const fsBtn = shadow.getElementById('dock-fs-btn');
+    const fsTooltip = shadow.getElementById('dock-fs-tooltip');
+
+    if (fsBtn && fsTooltip) {
+      fsBtn.addEventListener('click', async (e: any) => {
+        e.stopPropagation();
+        if (fsBtn.classList.contains('enforcing')) return;
+
+        fsBtn.classList.add('enforcing');
+        fsTooltip.textContent = 'Checking...';
+        fsTooltip.classList.add('visible');
+
+        try {
+          const result: { isFullScreen: boolean; isKiosk: boolean; wasEnforced: boolean } =
+            await ipcRenderer.invoke('verify-fullscreen');
+
+          fsBtn.classList.remove('enforcing');
+
+          if (result.wasEnforced) {
+            fsBtn.classList.add('ok-flash');
+            fsTooltip.textContent = '✓ Re-enforced Fullscreen!';
+          } else {
+            fsBtn.classList.add('ok-flash');
+            fsTooltip.textContent = '✓ Fullscreen Active & Locked';
+          }
+
+          setTimeout(() => {
+            fsBtn.classList.remove('ok-flash');
+            fsTooltip.classList.remove('visible');
+            fsTooltip.textContent = '';
+          }, 2200);
+        } catch {
+          fsBtn.classList.remove('enforcing');
+          fsTooltip.textContent = '✗ Could not verify';
+          setTimeout(() => {
+            fsTooltip.classList.remove('visible');
+          }, 2000);
+        }
+      });
+    }
 
     // In-App Exit Modal Handler: Prevents OS window blur & false tab switch violations
     const exitBtn = shadow.getElementById('dock-exit-btn');
